@@ -1,0 +1,8 @@
+# Credenciais reais da base de dados (usar htdocs/db.exemplo.php como modelo)
+htdocs/db.php
+# Dados pessoais e ficheiros carregados pelos utilizadores
+htdocs/dados_estagios/*.json
+htdocs/manuais_ficheiros/*
+!htdocs/manuais_ficheiros/.htaccess
+# PDFs soltos na raiz
+htdocs/*.pdf

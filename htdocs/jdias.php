@@ -1,0 +1,385 @@
+<?php
+session_start();
+require_once 'db.php';
+
+// REGRA DE OURO: Funções centralizadas
+if (file_exists('functions.php')) {
+    require_once 'functions.php';
+} else {
+    function registrarLog($pdo, $acao, $modulo) { return true; }
+}
+
+// REGRA DE OURO 1: Validação de sessão
+if (!isset($_SESSION['user_id'])) {
+    header("Location: index.php");
+    exit;
+}
+
+$perfil_user = $_SESSION['perfil'] ?? '';
+$is_admin = in_array($perfil_user, ['admin', 'administrativo']);
+
+// Acesso Restrito à Gestão Global
+if (!$is_admin) {
+    header("Location: index.php?erro=sem_permissao");
+    exit;
+}
+
+$nome_completo = $_SESSION['nome'] ?? 'Utilizador';
+$primeiro_nome = explode(' ', trim($nome_completo))[0];
+
+function formataValor($valor) {
+    return number_format((float)$valor, 2, ',', '.') . ' €';
+}
+function tabelaExiste($pdo, $tabela) {
+    try {
+        $st = $pdo->query("SHOW TABLES LIKE " . $pdo->quote($tabela));
+        return $st && $st->rowCount() > 0;
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+// --- TOTAIS (apenas documentos Ativos — os mesmos que entram no acerto) ---
+$fserv_total = 0; $fserv_n = 0; $fserv_por_corrigir = 0;
+$fat_total = 0;   $fat_n = 0;
+$fatfav_total = 0; $fatfav_n = 0;
+$n_acertados = 0;
+$ultimo_acerto = null;
+
+try {
+    if (tabelaExiste($pdo, 'jdias_fserv')) {
+        $r = $pdo->query("SELECT COALESCE(SUM(valor_corrigido), 0) AS total, COUNT(*) AS n,
+                                 SUM(CASE WHEN valor_certo = 'Nao' THEN 1 ELSE 0 END) AS por_corrigir
+                          FROM jdias_fserv WHERE estado = 'Ativo'")->fetch(PDO::FETCH_ASSOC);
+        $fserv_total = (float)$r['total']; $fserv_n = (int)$r['n']; $fserv_por_corrigir = (int)$r['por_corrigir'];
+        $n_acertados += (int)$pdo->query("SELECT COUNT(*) FROM jdias_fserv WHERE estado = 'Acertado'")->fetchColumn();
+    }
+    if (tabelaExiste($pdo, 'jdias_fat')) {
+        $r = $pdo->query("SELECT COALESCE(SUM(valor), 0) AS total, COUNT(*) AS n FROM jdias_fat WHERE estado = 'Ativo'")->fetch(PDO::FETCH_ASSOC);
+        $fat_total = (float)$r['total']; $fat_n = (int)$r['n'];
+        $n_acertados += (int)$pdo->query("SELECT COUNT(*) FROM jdias_fat WHERE estado = 'Acertado'")->fetchColumn();
+    }
+    if (tabelaExiste($pdo, 'jdias_fatfav')) {
+        $r = $pdo->query("SELECT COALESCE(SUM(valor), 0) AS total, COUNT(*) AS n FROM jdias_fatfav WHERE estado = 'Ativo'")->fetch(PDO::FETCH_ASSOC);
+        $fatfav_total = (float)$r['total']; $fatfav_n = (int)$r['n'];
+        $n_acertados += (int)$pdo->query("SELECT COUNT(*) FROM jdias_fatfav WHERE estado = 'Acertado'")->fetchColumn();
+    }
+    if (tabelaExiste($pdo, 'jdias_acertos')) {
+        $ultimo_acerto = $pdo->query("SELECT * FROM jdias_acertos ORDER BY numero DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
+    }
+} catch (Exception $e) {
+    // Ignora erros caso as tabelas ainda não existam
+}
+
+// Total a acertar = soma das 3 parcelas (os valores já trazem o sinal: NCRE, Faturas Cliente e Devoluções são negativos)
+$total_acertar = round($fserv_total + $fat_total + $fatfav_total, 2);
+$classe_saldo = $total_acertar > 0 ? 'pos' : ($total_acertar < 0 ? 'neg' : 'zero');
+?>
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>J. Dias (Gestão) - MAB</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        /* ===== BASE COMUM (regras do projeto: logo -> início, sem ícones de navegação, voltar só com símbolo, responsivo) ===== */
+        :root {
+            --laranja: #e67e22; --laranja-esc: #d35400; --laranja-claro: #fdf2e9;
+            --verde: #27ae60; --verde-claro: #eafaf1;
+            --vermelho: #c0392b; --vermelho-claro: #fdedec;
+            --azul: #2980b9; --azul-claro: #ebf5fb;
+            --roxo: #8e44ad; --roxo-claro: #f5eef8;
+            --texto: #2c3e50; --suave: #7f8c8d; --borda: #e8ecf1; --fundo: #f4f6fa;
+        }
+        * { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; box-sizing: border-box; }
+        body { background: var(--fundo); margin: 0; color: var(--texto); font-size: 14px; padding-bottom: 60px; }
+
+        /* Cabeçalho */
+        .topbar { background: rgba(255,255,255,0.94); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); padding: 10px 40px; box-shadow: 0 1px 0 var(--borda); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+        .topbar-left a { display: block; }
+        .topbar-left .logo { height: 35px; display: block; }
+        .topbar-right { display: flex; align-items: center; gap: 12px; }
+        .btn-voltar { width: 40px; height: 40px; border-radius: 50%; background: #fff; border: 1px solid var(--borda); color: #576574; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; font-size: 16px; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.04); flex-shrink: 0; }
+        .btn-voltar:hover { background: var(--laranja-claro); color: var(--laranja); border-color: #f5cba7; transform: translateX(-2px); }
+        .btn-voltar:active { transform: scale(0.94); }
+        .user-menu { position: relative; }
+        .user-btn { background: #fff; border: 1px solid var(--borda); border-radius: 30px; font-size: 14px; font-weight: 600; color: var(--texto); cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 5px 14px 5px 5px; transition: 0.2s; }
+        .user-btn:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.06); }
+        .user-avatar { background: var(--laranja); color: #fff; width: 28px; height: 28px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 13px; }
+        .dropdown-content { display: none; position: absolute; right: 0; top: 100%; background: #fff; min-width: 180px; box-shadow: 0 12px 30px rgba(0,0,0,0.1); border-radius: 10px; border: 1px solid var(--borda); overflow: hidden; margin-top: 6px; z-index: 200; }
+        .user-menu:hover .dropdown-content, .user-menu.aberto .dropdown-content { display: block; }
+        .dropdown-content a { color: #576574; padding: 12px 20px; text-decoration: none; display: block; font-size: 14px; }
+        .dropdown-content a:hover { background: var(--laranja-claro); color: var(--laranja); }
+
+        /* Página */
+        .container { max-width: 1100px; margin: 32px auto; padding: 0 20px; }
+        .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 15px; flex-wrap: wrap; margin-bottom: 22px; }
+        .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: var(--laranja); margin-bottom: 4px; }
+        .page-title { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }
+        .page-sub { color: var(--suave); margin-top: 4px; }
+        .chip { background: #fff; border: 1px solid var(--borda); border-radius: 30px; padding: 8px 14px; font-size: 12.5px; color: #576574; display: inline-flex; align-items: center; gap: 8px; text-decoration: none; transition: 0.2s; font-weight: 600; }
+        a.chip:hover { border-color: #f5cba7; color: var(--laranja-esc); }
+        .chip i { color: var(--laranja); }
+
+        .alert { padding: 14px 16px; border-radius: 10px; margin-bottom: 18px; font-weight: 600; display: flex; gap: 10px; align-items: flex-start; }
+        .alert-erro { background: var(--vermelho-claro); color: var(--vermelho); border: 1px solid #f5b7b1; }
+        .alert-sucesso { background: var(--verde-claro); color: #1e8449; border: 1px solid #abebc6; }
+        .alert-aviso { background: #fef5e7; color: #9a6400; border: 1px solid #f9e79f; }
+
+        .card { background: #fff; border-radius: 16px; border: 1px solid var(--borda); box-shadow: 0 2px 6px rgba(0,0,0,0.02); padding: 22px; margin-bottom: 24px; }
+        .card h2 { margin: 0 0 16px; font-size: 16px; font-weight: 800; }
+
+        @media (max-width: 1024px) {
+            .topbar { padding: 10px 24px; }
+            .container { margin: 24px auto; }
+        }
+        @media (max-width: 768px) {
+            .topbar { padding: 8px 15px; }
+            .topbar-left .logo { height: 30px; }
+            .btn-voltar { width: 38px; height: 38px; }
+            .container { margin: 18px auto; padding: 0 12px; }
+            .page-title { font-size: 22px; }
+            .page-sub { font-size: 13px; }
+            .card { padding: 16px; border-radius: 14px; }
+        }
+        @media (max-width: 560px) {
+            .user-nome { display: none; }
+            .user-btn { padding: 4px; gap: 4px; }
+            .user-btn .fa-caret-down { display: none; }
+            .page-head .chip { width: 100%; justify-content: center; }
+        }
+
+        /* Cabeçalho centrado */
+        .page-header { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 14px; margin-bottom: 24px; }
+
+        /* Painel do saldo */
+        .hero { background: linear-gradient(135deg, #2c3e50 0%, #34495e 60%, #3d566e 100%); border-radius: 18px; padding: 28px 30px; color: #fff; display: grid; grid-template-columns: 1fr 1.1fr; gap: 30px; box-shadow: 0 15px 35px rgba(44,62,80,0.18); position: relative; overflow: hidden; margin-bottom: 28px; }
+        .hero::after { content: ''; position: absolute; right: -60px; top: -60px; width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle, rgba(230,126,34,0.35), transparent 70%); pointer-events: none; }
+        .hero-label { font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; opacity: 0.7; font-weight: 700; }
+        .hero-valor { font-size: 40px; font-weight: 800; letter-spacing: -1px; margin: 6px 0 4px; }
+        .hero-valor.neg { color: #f1948a; }
+        .hero-texto { font-size: 14px; opacity: 0.85; display: flex; align-items: center; gap: 8px; }
+        .hero-aviso { margin-top: 10px; display: inline-flex; align-items: center; gap: 8px; background: rgba(241,196,15,0.15); color: #f8c471; border: 1px solid rgba(248,196,113,0.4); padding: 6px 12px; border-radius: 20px; font-size: 12.5px; font-weight: 700; }
+        .hero-btn { margin-top: 18px; display: inline-flex; align-items: center; gap: 8px; background: var(--laranja); color: #fff; text-decoration: none; font-weight: 700; padding: 10px 18px; border-radius: 10px; transition: 0.2s; }
+        .hero-btn:hover { background: var(--laranja-esc); transform: translateY(-1px); }
+        .hero-dir { display: flex; flex-direction: column; justify-content: center; gap: 12px; position: relative; z-index: 1; }
+        .linha-parcela { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding-bottom: 10px; border-bottom: 1px dashed rgba(255,255,255,0.18); }
+        .linha-parcela:last-child { border-bottom: none; padding-bottom: 0; }
+        .linha-parcela span { opacity: 0.8; display: flex; align-items: center; gap: 8px; }
+        .linha-parcela b { font-size: 17px; white-space: nowrap; }
+        .linha-parcela b.neg { color: #f1948a; }
+        .ponto { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+
+        /* Grelha de módulos (cartões centrados) */
+        .seccao-titulo { font-size: 13px; font-weight: 800; color: var(--suave); text-transform: uppercase; letter-spacing: 1.2px; margin: 0 0 14px; text-align: center; }
+        .menu-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 18px; }
+        .menu-grid > .menu-card { flex: 1 1 260px; max-width: 340px; }
+        .menu-card { --cor: var(--laranja); --cor-claro: var(--laranja-claro); background: #fff; border-radius: 16px; border: 1px solid var(--borda); padding: 22px; text-decoration: none; color: var(--texto); display: flex; flex-direction: column; gap: 18px; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.02); position: relative; }
+        .menu-card:hover { transform: translateY(-4px); box-shadow: 0 14px 30px rgba(0,0,0,0.07); border-color: transparent; }
+        .menu-card.azul { --cor: var(--azul); --cor-claro: var(--azul-claro); }
+        .menu-card.roxo { --cor: var(--roxo); --cor-claro: var(--roxo-claro); }
+        .menu-card.escuro { --cor: #2c3e50; --cor-claro: #ebedef; }
+        .card-top { display: flex; justify-content: space-between; align-items: flex-start; }
+        .menu-icon { background: var(--cor-claro); color: var(--cor); width: 48px; height: 48px; border-radius: 14px; display: flex; justify-content: center; align-items: center; font-size: 20px; }
+        .seta { color: #cfd6de; transition: 0.2s; }
+        .menu-card:hover .seta { color: var(--cor); transform: translateX(3px); }
+        .menu-card h3 { margin: 0; font-size: 16px; font-weight: 800; }
+        .menu-card p { margin: 4px 0 0; color: var(--suave); font-size: 12.5px; }
+        .card-rodape { display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #f1f3f6; padding-top: 14px; margin-top: auto; }
+        .card-valor { font-size: 19px; font-weight: 800; color: var(--cor); }
+        .card-valor.neg { color: var(--vermelho); }
+        .card-qtd { background: var(--cor-claro); color: var(--cor); font-weight: 700; font-size: 12px; padding: 4px 10px; border-radius: 20px; }
+        .tag-aviso { position: absolute; top: 14px; right: 44px; background: #fef5e7; color: #b9770e; border: 1px solid #f9e79f; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 20px; }
+
+        @media (max-width: 1024px) {
+            .hero { gap: 22px; padding: 24px; }
+            .hero-valor { font-size: 34px; }
+            .menu-grid { gap: 16px; }
+            .menu-grid > .menu-card { flex: 1 1 220px; }
+            .menu-grid.tres > .menu-card { flex-basis: 200px; }
+            .menu-grid.tres .menu-card p { min-height: 32px; }
+        }
+        @media (max-width: 768px) {
+            .page-header { margin-bottom: 18px; }
+            .hero { grid-template-columns: 1fr; padding: 22px; border-radius: 16px; gap: 20px; }
+            .hero-valor { font-size: 32px; }
+            .hero-btn { width: 100%; justify-content: center; padding: 12px; }
+        }
+        @media (max-width: 680px) {
+            .menu-grid.tres > .menu-card { flex-basis: 100%; max-width: none; }
+            .menu-grid.tres .menu-card p { min-height: 0; }
+        }
+        @media (max-width: 560px) {
+            .hero { padding: 18px; }
+            .hero-valor { font-size: 30px; }
+            .menu-grid { gap: 12px; }
+            .menu-grid > .menu-card { flex-basis: 100%; max-width: none; }
+            .menu-card { padding: 16px; gap: 12px; display: grid; grid-template-columns: 44px 1fr; grid-template-areas: "icone texto" "rodape rodape"; align-items: center; }
+            .card-top { grid-area: icone; }
+            .card-top .seta { display: none; }
+            .menu-card > div:not(.card-top):not(.card-rodape) { grid-area: texto; }
+            .card-rodape { grid-area: rodape; padding-top: 10px; }
+            .menu-icon { width: 44px; height: 44px; font-size: 18px; border-radius: 12px; }
+            .menu-card:hover { transform: none; }
+            .tag-aviso { top: 10px; right: 12px; }
+            .card-valor { font-size: 17px; }
+        }
+    </style>
+</head>
+<body>
+
+    <header class="topbar">
+        <div class="topbar-left"><a href="index.php" title="Página inicial"><img src="mab.png" alt="MAB" class="logo"></a></div>
+        <div class="topbar-right">
+            <a href="gestao.php" class="btn-voltar" title="Voltar" aria-label="Voltar"><i class="fa-solid fa-arrow-left"></i></a>
+            <div class="user-menu">
+                <button type="button" class="user-btn">
+                    <div class="user-avatar"><i class="fa-solid fa-user"></i></div>
+                    <span class="user-nome"><?= htmlspecialchars($primeiro_nome) ?></span>
+                    <i class="fa-solid fa-caret-down" style="font-size: 12px; color: #95a5a6;"></i>
+                </button>
+                <div class="dropdown-content">
+                    <a href="perfil.php"><i class="fa-solid fa-id-badge" style="width:20px;"></i> Perfil</a>
+                    <a href="index.php?logout=1" style="color: #e74c3c; border-top: 1px solid #f1f2f6;"><i class="fa-solid fa-right-from-bracket" style="width:20px;"></i> Sair</a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+
+        <div class="page-header">
+            <div>
+                <div class="eyebrow">Faturação</div>
+                <h1 class="page-title">Módulo J. Dias</h1>
+                <div class="page-sub">Conta corrente entre a m.Abreu e a J. Dias</div>
+            </div>
+            <?php if ($ultimo_acerto): ?>
+                <a href="jdias_acerto_pdf.php?id=<?= (int)$ultimo_acerto['numero'] ?>" target="_blank" class="chip" title="Imprimir o último acerto">
+                    <i class="fa-solid fa-clock-rotate-left"></i>
+                    Último acerto: nº <?= (int)$ultimo_acerto['numero'] ?> de <?= date('d/m/Y', strtotime($ultimo_acerto['data_registo'])) ?>
+                    <i class="fa-solid fa-print"></i>
+                </a>
+            <?php endif; ?>
+        </div>
+
+        <!-- PAINEL DO SALDO ATUAL -->
+        <div class="hero">
+            <div style="position: relative; z-index: 1;">
+                <div class="hero-label">Total a acertar</div>
+                <div class="hero-valor <?= $classe_saldo ?>"><?= formataValor($total_acertar) ?></div>
+                <div class="hero-texto"><i class="fa-solid fa-calculator"></i> Soma das Folhas de Serviço, Faturas e Abertura + Faturas Cliente</div>
+                <?php if ($fserv_por_corrigir > 0): ?>
+                    <div class="hero-aviso"><i class="fa-solid fa-triangle-exclamation"></i> Falta corrigir <?= $fserv_por_corrigir ?> FSERV — acerto bloqueado</div>
+                <?php endif; ?>
+                <br>
+                <a href="jdias_acertos.php" class="hero-btn"><i class="fa-solid fa-scale-balanced"></i> Ir para Acertos</a>
+            </div>
+            <div class="hero-dir">
+                <div class="linha-parcela"><span><i class="ponto" style="background:#f0b27a;"></i> Folhas de Serviço (V. Corrigido)</span><b class="<?= $fserv_total < 0 ? 'neg' : '' ?>"><?= formataValor($fserv_total) ?></b></div>
+                <div class="linha-parcela"><span><i class="ponto" style="background:#85c1e9;"></i> Faturas</span><b class="<?= $fat_total < 0 ? 'neg' : '' ?>"><?= formataValor($fat_total) ?></b></div>
+                <div class="linha-parcela"><span><i class="ponto" style="background:#c39bd3;"></i> Abertura + Faturas Cliente</span><b class="<?= $fatfav_total < 0 ? 'neg' : '' ?>"><?= formataValor($fatfav_total) ?></b></div>
+            </div>
+        </div>
+
+        <h2 class="seccao-titulo">Documentos em aberto</h2>
+        <div class="menu-grid tres">
+
+            <a href="jdias_fserv.php" class="menu-card">
+                <?php if ($fserv_por_corrigir > 0): ?><span class="tag-aviso"><?= $fserv_por_corrigir ?> por corrigir</span><?php endif; ?>
+                <div class="card-top">
+                    <div class="menu-icon"><i class="fa-solid fa-file-signature"></i></div>
+                    <i class="fa-solid fa-arrow-right seta"></i>
+                </div>
+                <div>
+                    <h3>Folhas de Serviço</h3>
+                    <p>FSERV · conta o V. Corrigido</p>
+                </div>
+                <div class="card-rodape">
+                    <span class="card-valor <?= $fserv_total < 0 ? 'neg' : '' ?>"><?= formataValor($fserv_total) ?></span>
+                    <span class="card-qtd"><?= $fserv_n ?> reg.</span>
+                </div>
+            </a>
+
+            <a href="jdias_fat.php" class="menu-card azul">
+                <div class="card-top">
+                    <div class="menu-icon"><i class="fa-solid fa-file-invoice-dollar"></i></div>
+                    <i class="fa-solid fa-arrow-right seta"></i>
+                </div>
+                <div>
+                    <h3>Faturas</h3>
+                    <p>Faturas (FAT) e Notas de Crédito (NCRE)</p>
+                </div>
+                <div class="card-rodape">
+                    <span class="card-valor <?= $fat_total < 0 ? 'neg' : '' ?>"><?= formataValor($fat_total) ?></span>
+                    <span class="card-qtd"><?= $fat_n ?> doc.</span>
+                </div>
+            </a>
+
+            <a href="jdias_fatfav.php" class="menu-card roxo">
+                <div class="card-top">
+                    <div class="menu-icon"><i class="fa-solid fa-file-circle-check"></i></div>
+                    <i class="fa-solid fa-arrow-right seta"></i>
+                </div>
+                <div>
+                    <h3>Abertura + Faturas Cliente</h3>
+                    <p>Saldos de abertura, faturas cliente e devoluções</p>
+                </div>
+                <div class="card-rodape">
+                    <span class="card-valor <?= $fatfav_total < 0 ? 'neg' : '' ?>"><?= formataValor($fatfav_total) ?></span>
+                    <span class="card-qtd"><?= $fatfav_n ?> reg.</span>
+                </div>
+            </a>
+
+        </div>
+
+        <h2 class="seccao-titulo" style="margin-top: 30px;">Acertos e arquivo</h2>
+        <div class="menu-grid">
+
+            <a href="jdias_acertos.php" class="menu-card">
+                <div class="card-top">
+                    <div class="menu-icon"><i class="fa-solid fa-scale-balanced"></i></div>
+                    <i class="fa-solid fa-arrow-right seta"></i>
+                </div>
+                <div>
+                    <h3>Acertos</h3>
+                    <p>Efetuar acerto, histórico e impressão</p>
+                </div>
+                <div class="card-rodape">
+                    <span class="card-valor <?= $total_acertar < 0 ? 'neg' : '' ?>"><?= formataValor($total_acertar) ?></span>
+                    <span class="card-qtd"><?= $ultimo_acerto ? 'Último nº ' . (int)$ultimo_acerto['numero'] : 'Sem acertos' ?></span>
+                </div>
+            </a>
+
+            <a href="jdias_arquivo.php" class="menu-card escuro">
+                <div class="card-top">
+                    <div class="menu-icon"><i class="fa-solid fa-box-archive"></i></div>
+                    <i class="fa-solid fa-arrow-right seta"></i>
+                </div>
+                <div>
+                    <h3>Arquivo (Acertados)</h3>
+                    <p>Documentos já acertados, por acerto</p>
+                </div>
+                <div class="card-rodape">
+                    <span class="card-valor" style="font-size: 15px;">Consultar</span>
+                    <span class="card-qtd"><?= $n_acertados ?> reg.</span>
+                </div>
+            </a>
+
+        </div>
+
+    </div>
+
+    <script>
+        // Menu do utilizador: em ecrãs táteis (tablet/telemóvel) abre com toque
+        (function () {
+            const menu = document.querySelector('.user-menu');
+            const btn = menu ? menu.querySelector('.user-btn') : null;
+            if (!btn) return;
+            btn.addEventListener('click', function (e) { e.stopPropagation(); menu.classList.toggle('aberto'); });
+            document.addEventListener('click', function () { menu.classList.remove('aberto'); });
+        })();
+    </script>
+</body>
+</html>

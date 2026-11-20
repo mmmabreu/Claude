@@ -1,0 +1,362 @@
+/* ==========================================================================
+   GESTÃO MAB — FOLHA DE ESTILOS CENTRAL
+   --------------------------------------------------------------------------
+   Identidade: Vermelho #b32a2a (marca, login, topbar)
+   Filosofia : Vermelho como base + cor de acento por módulo
+   Uso       : <link rel="stylesheet" href="estilo.css"> em todas as páginas
+   --------------------------------------------------------------------------
+   Para mudar a cor de um módulo, edita a variável --acento na regra
+   .modulo-XXX (fim deste ficheiro). Para mudar a marca, edita --cor-marca.
+   ========================================================================== */
+
+/* --- 1. VARIÁVEIS GLOBAIS ------------------------------------------------ */
+:root {
+    /* Marca */
+    --cor-marca:        #b32a2a;
+    --cor-marca-escura: #8f2121;
+    --cor-marca-clara:  #fdf2f2;
+
+    /* Acento (assume vermelho por defeito; cada módulo redefine) */
+    --acento:        var(--cor-marca);
+    --acento-escuro: var(--cor-marca-escura);
+    --acento-claro:  var(--cor-marca-clara);
+
+    /* Neutros / texto */
+    --texto:          #2c3e50;
+    --texto-suave:    #576574;
+    --texto-ligeiro:  #95a5a6;
+
+    /* Superfícies */
+    --fundo:          #f7f9fc;
+    --branco:         #ffffff;
+    --linha:          #e1e5ea;
+    --linha-suave:    #f1f2f6;
+
+    /* Estados */
+    --sucesso:        #27ae60;
+    --sucesso-fundo:  #e8f5e9;
+    --erro:           #e74c3c;
+    --erro-fundo:     #fdeded;
+    --aviso:          #f39c12;
+    --aviso-fundo:    #fef5e7;
+
+    /* Forma */
+    --raio:       8px;
+    --raio-grande:12px;
+    --sombra:     0 4px 15px rgba(0,0,0,0.04);
+    --sombra-alta:0 12px 30px rgba(0,0,0,0.08);
+}
+
+/* --- 2. BASE ------------------------------------------------------------- */
+* { box-sizing: border-box; }
+
+body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background-color: var(--fundo);
+    margin: 0;
+    color: var(--texto);
+    padding-bottom: 50px;
+}
+
+a { color: var(--acento); }
+
+/* --- 3. TOPBAR / CABEÇALHO ---------------------------------------------- */
+.topbar {
+    background: var(--branco);
+    padding: 15px 30px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.05);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    border-bottom: 3px solid var(--cor-marca);
+}
+.topbar-left .logo { height: 38px; width: auto; display: block; }
+.topbar-center {
+    display: flex; align-items: center; gap: 12px;
+    flex: 1; justify-content: center; flex-wrap: wrap;
+}
+.topbar-right { display: flex; align-items: center; gap: 20px; }
+
+/* Ícones de navegação */
+.nav-icon {
+    color: var(--texto-ligeiro);
+    font-size: 18px;
+    text-decoration: none;
+    padding: 6px;
+    border-radius: 6px;
+    transition: color .2s, background .2s;
+}
+.nav-icon:hover { background: var(--linha-suave); color: var(--texto); }
+.nav-icon.active { color: var(--acento); }
+
+/* Botão voltar */
+.btn-back {
+    color: var(--texto-suave); text-decoration: none; font-weight: 500;
+    display: flex; align-items: center; gap: 6px; font-size: 15px;
+    transition: .2s;
+}
+.btn-back:hover { color: var(--acento); }
+
+/* Menu de utilizador */
+.user-menu { position: relative; display: inline-block; }
+.user-btn {
+    background: none; border: none; font-size: 14px; font-weight: 600;
+    color: var(--texto); cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+}
+.user-avatar {
+    background: var(--cor-marca); color: #fff;
+    width: 28px; height: 28px; border-radius: 50%;
+    display: flex; justify-content: center; align-items: center;
+    font-size: 14px; border: 2px solid var(--cor-marca-clara);
+}
+.dropdown-content {
+    display: none; position: absolute; right: 0; top: 100%; margin-top: 10px;
+    background: var(--branco); min-width: 190px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+    border-radius: var(--raio); overflow: hidden;
+    border: 1px solid var(--linha-suave); z-index: 200;
+}
+.dropdown-content a {
+    color: var(--texto-suave); padding: 12px 20px;
+    text-decoration: none; display: block; font-size: 14px;
+}
+.dropdown-content a:hover { background: var(--cor-marca-clara); color: var(--cor-marca); }
+.user-menu:hover .dropdown-content { display: block; }
+
+/* --- 4. ESTRUTURA DE PÁGINA --------------------------------------------- */
+.container { max-width: 1300px; margin: 30px auto; padding: 0 15px; }
+
+.page-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 25px; flex-wrap: wrap; gap: 15px;
+}
+.page-title {
+    margin: 0; color: var(--texto); font-size: 24px; font-weight: 800;
+    display: flex; align-items: center; gap: 10px;
+}
+.page-title i { color: var(--acento); }
+
+/* --- 5. BOTÕES ----------------------------------------------------------- */
+.btn-primary {
+    background: var(--acento); color: #fff;
+    padding: 12px 24px; border-radius: var(--raio);
+    text-decoration: none; font-weight: 700; cursor: pointer; border: none;
+    display: inline-flex; align-items: center; gap: 8px; transition: .2s;
+}
+.btn-primary:hover { background: var(--acento-escuro); transform: translateY(-2px); }
+
+.btn-secundario {
+    background: var(--linha-suave); color: var(--texto-suave);
+    padding: 12px 24px; border-radius: var(--raio);
+    text-decoration: none; font-weight: 600; cursor: pointer; border: none;
+    display: inline-flex; align-items: center; gap: 8px; transition: .2s;
+}
+.btn-secundario:hover { background: var(--linha); }
+
+/* Botões-ícone (ações nas tabelas) */
+.btn-icon {
+    color: var(--texto-suave); background: var(--linha-suave);
+    padding: 8px; border-radius: 6px; text-decoration: none; transition: .2s;
+    display: inline-flex; width: 32px; height: 32px;
+    align-items: center; justify-content: center; font-size: 15px;
+    border: none; cursor: pointer;
+}
+.btn-edit:hover { background: var(--linha); color: var(--acento); }
+.btn-del { color: var(--erro); background: var(--erro-fundo); }
+.btn-del:hover { background: #fadbd8; color: #c0392b; }
+
+/* --- 6. ALERTAS ---------------------------------------------------------- */
+.alert {
+    padding: 15px; border-radius: var(--raio); margin-bottom: 20px;
+    text-align: center; font-weight: 600;
+}
+.alert-erro    { background: var(--erro-fundo);    color: var(--erro);    border: 1px solid #f9cccc; }
+.alert-sucesso { background: var(--sucesso-fundo); color: var(--sucesso); border: 1px solid #c8e6c9; }
+.alert-aviso   { background: var(--aviso-fundo);   color: var(--aviso);   border: 1px solid #fad7a0; }
+
+/* --- 7. CARTÕES E TABELAS ------------------------------------------------ */
+.card {
+    background: var(--branco); border-radius: var(--raio-grande);
+    box-shadow: var(--sombra); border: 1px solid var(--linha); overflow: hidden;
+}
+
+table { width: 100%; border-collapse: collapse; }
+th {
+    padding: 15px 20px; background: #f8f9fa; color: var(--texto-suave);
+    font-size: 11px; text-transform: uppercase; text-align: left;
+    border-bottom: 2px solid var(--linha);
+}
+td {
+    padding: 15px 20px; border-bottom: 1px solid var(--linha-suave);
+    font-size: 14px; color: var(--texto); vertical-align: middle;
+}
+tr:hover { background: #fdfcfb; }
+.acoes-coluna { display: flex; gap: 8px; }
+
+/* Estados (badges) */
+.status-badge {
+    padding: 4px 10px; border-radius: 20px; font-size: 11px;
+    font-weight: 700; display: inline-block; text-transform: uppercase;
+}
+.ativo   { background: var(--sucesso-fundo); color: var(--sucesso); border: 1px solid #c8e6c9; }
+.inativo { background: var(--erro-fundo);    color: var(--erro);    border: 1px solid #f9cccc; }
+
+/* --- 8. FORMULÁRIOS ------------------------------------------------------ */
+.form-card {
+    background: var(--branco); border-radius: var(--raio-grande);
+    box-shadow: var(--sombra); border: 1px solid var(--linha);
+    padding: 30px; max-width: 800px; margin: 0 auto;
+}
+.form-grupo { margin-bottom: 20px; }
+.form-grupo label {
+    display: block; margin-bottom: 8px; font-weight: 600;
+    color: var(--texto-suave); font-size: 14px;
+}
+.form-grupo input[type="text"],
+.form-grupo input[type="email"],
+.form-grupo input[type="tel"],
+.form-grupo input[type="number"],
+.form-grupo input[type="date"],
+.form-grupo input[type="password"],
+.form-grupo select,
+.form-grupo textarea {
+    width: 100%; padding: 12px; border: 1px solid #dcdde1;
+    border-radius: 6px; font-size: 15px; outline: none;
+    transition: border-color .2s; font-family: inherit;
+}
+.form-grupo input:focus,
+.form-grupo select:focus,
+.form-grupo textarea:focus { border-color: var(--acento); }
+
+/* --- 9. MODAIS ----------------------------------------------------------- */
+.modal {
+    display: none; position: fixed; top: 0; left: 0;
+    width: 100%; height: 100%; background: rgba(0,0,0,0.6);
+    z-index: 1001; justify-content: center; align-items: center;
+    backdrop-filter: blur(2px);
+}
+.modal-content {
+    background: var(--branco); padding: 30px; border-radius: var(--raio-grande);
+    width: 90%; max-width: 400px; text-align: center;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.2);
+}
+.modal-content h3 {
+    color: var(--erro); margin: 0 0 15px;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+}
+.modal-content input[type="password"] {
+    width: 100%; padding: 12px; margin: 20px 0;
+    border: 1px solid #dcdde1; border-radius: 6px; font-size: 15px; outline: none;
+}
+.modal-content input[type="password"]:focus { border-color: var(--erro); }
+.modal-btns { display: flex; gap: 10px; margin-top: 15px; }
+.modal-btns button {
+    flex: 1; padding: 12px; border: none; border-radius: var(--raio);
+    font-weight: 600; cursor: pointer; transition: .2s;
+}
+.btn-cancel { background: var(--linha-suave); color: var(--texto-suave); }
+.btn-cancel:hover { background: var(--linha); }
+.btn-danger { background: var(--erro); color: #fff; }
+.btn-danger:hover { background: #c0392b; }
+
+/* ==========================================================================
+   10. RESPONSIVO — adapta-se a PC, TABLET e TELEMÓVEL
+   --------------------------------------------------------------------------
+   PC        : > 1024px  (layout completo)
+   TABLET    : 601–1024px (ícones mais juntos, container fluido)
+   TELEMÓVEL : ≤ 600px   (menu em linha deslizável, tabelas em cartões)
+   ========================================================================== */
+
+/* --- TABLET (601px a 1024px) -------------------------------------------- */
+@media (max-width: 1024px) {
+    .container { margin: 20px auto; padding: 0 12px; }
+    .topbar { padding: 12px 18px; }
+    .topbar-center { gap: 6px; }
+    .nav-icon { font-size: 17px; padding: 5px; }
+    .page-title { font-size: 21px; }
+    .form-card { padding: 24px; }
+    /* ações da topbar mais compactas */
+    .topbar-right { gap: 12px; }
+}
+
+/* --- TELEMÓVEL (≤ 600px) ------------------------------------------------ */
+@media (max-width: 600px) {
+    .topbar {
+        padding: 10px 14px;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    .btn-back-text { display: none; }
+
+    /* O menu de ícones passa a uma faixa horizontal que se desliza com o dedo,
+       em vez de desaparecer — assim não se perde a navegação no telemóvel. */
+    .topbar-center {
+        order: 3;
+        width: 100%;
+        justify-content: flex-start;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        gap: 4px;
+        padding: 6px 2px 2px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+    .topbar-center::-webkit-scrollbar { display: none; }
+    .nav-icon { font-size: 18px; padding: 8px; flex: 0 0 auto; }
+
+    .page-header { flex-direction: column; align-items: stretch; }
+    .page-title { font-size: 20px; justify-content: center; }
+    .btn-primary { justify-content: center; width: 100%; }
+
+    .form-card { padding: 18px; border-radius: var(--raio); }
+    .container { margin: 15px auto; }
+
+    /* Tabelas viram cartões empilhados (cada linha = um cartão) */
+    .card { background: transparent; border: none; box-shadow: none; }
+    table, thead, tbody, th, td, tr { display: block; }
+    thead tr { position: absolute; top: -9999px; left: -9999px; }
+    tr {
+        background: var(--branco); margin-bottom: 15px;
+        border-radius: var(--raio-grande); border: 1px solid var(--linha);
+        box-shadow: var(--sombra); padding: 5px 0;
+    }
+    td {
+        border: none; border-bottom: 1px solid var(--linha-suave);
+        position: relative; padding: 12px 15px 12px 42%;
+        text-align: right; min-height: 24px;
+        display: flex; justify-content: flex-end; align-items: center;
+    }
+    td::before {
+        content: attr(data-label); position: absolute; left: 15px;
+        width: 38%; text-align: left; font-weight: 700;
+        color: var(--texto-suave); font-size: 11px; text-transform: uppercase;
+    }
+    td:last-child { border-bottom: none; }
+
+    /* Modais ocupam quase todo o ecrã no telemóvel */
+    .modal-content { max-width: 92%; padding: 22px; }
+}
+
+/* ==========================================================================
+   11. ACENTOS POR MÓDULO
+   --------------------------------------------------------------------------
+   Adiciona a classe correspondente ao <body> de cada página. Ex:
+       <body class="modulo-clientes">
+   Isto redefine a variável --acento só para essa página, mantendo o
+   vermelho da marca na topbar/logo/login.
+   ========================================================================== */
+.modulo-clientes     { --acento: #3498db; --acento-escuro: #2980b9; --acento-claro: #ebf5fb; }
+.modulo-visitas      { --acento: #e84393; --acento-escuro: #c0397b; --acento-claro: #fdf0f7; }
+.modulo-servicos     { --acento: #b32a2a; --acento-escuro: #8f2121; --acento-claro: #fdf2f2; }
+.modulo-obras        { --acento: #2ecc71; --acento-escuro: #27ae60; --acento-claro: #eafaf1; }
+.modulo-relatorios   { --acento: #16a085; --acento-escuro: #117a65; --acento-claro: #e8f8f5; }
+.modulo-orcamentos   { --acento: #f39c12; --acento-escuro: #d68910; --acento-claro: #fef5e7; }
+.modulo-termos       { --acento: #9b59b6; --acento-escuro: #884ea0; --acento-claro: #f5eef8; }
+.modulo-equipa       { --acento: #7f8c8d; --acento-escuro: #6c7a7b; --acento-claro: #f2f4f4; }
+.modulo-viaturas     { --acento: #d35400; --acento-escuro: #ba4a00; --acento-claro: #fbeee6; }
+.modulo-equipamentos { --acento: #4a69bd; --acento-escuro: #3c569b; --acento-claro: #eaeef8; }
+.modulo-config       { --acento: #2c3e50; --acento-escuro: #1c2833; --acento-claro: #eaecee; }
