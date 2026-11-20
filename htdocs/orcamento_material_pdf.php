@@ -1,6 +1,7 @@
 <?php
 // LISTA DE MATERIAL A COMPRAR — só para orçamentos Adjudicados
 // Fonte: linhas do Detalhe Interno com quantidade e preço de custo (material).
+// Linhas com vários artigos (composição) são separadas nos artigos que as compõem.
 // Linhas iguais (mesma designação + unidade) são somadas. Sem preços nem referências.
 ob_start();
 session_start();
@@ -53,21 +54,35 @@ try {
 }
 
 // --- AGRUPAR MATERIAL ---
+// Linha com vários artigos da tabela de preços (composição): entra cada artigo em separado, com a
+// quantidade da linha × quantidade do artigo por unidade (como na FAME e no material a aprovisionar).
 $materiais = [];
-foreach ($itens_raw as $it) {
-    if (($it['tipo_linha'] ?? 'Interno') === 'Comercial') continue;   // só o Detalhe Interno
-    $qtd = (float)($it['quantidade'] ?? 0);
-    $pc  = (float)($it['preco_unitario_custo'] ?? 0);
-    if ($qtd <= 0 || $pc <= 0) continue;                               // títulos e mão de obra ficam de fora
-
-    $desig  = trim(preg_replace('/\s+/', ' ', (string)($it['designacao'] ?? '')));
-    $unid   = trim((string)($it['unidade'] ?? ''));
-    $chave  = mb_strtolower($desig . '|' . $unid, 'UTF-8');
-
+$juntar = function ($desig, $unid, $qtd) use (&$materiais) {
+    $desig = trim(preg_replace('/\s+/', ' ', (string)$desig));
+    $unid  = trim((string)$unid);
+    if ($desig === '' || $qtd <= 0) return;
+    $chave = mb_strtolower($desig . '|' . $unid, 'UTF-8');
     if (!isset($materiais[$chave])) {
         $materiais[$chave] = ['designacao' => $desig, 'unidade' => $unid, 'quantidade' => 0];
     }
     $materiais[$chave]['quantidade'] += $qtd;
+};
+foreach ($itens_raw as $it) {
+    if (($it['tipo_linha'] ?? 'Interno') === 'Comercial') continue;   // só o Detalhe Interno
+    $qtd = (float)($it['quantidade'] ?? 0);
+    if ($qtd <= 0) continue;                                           // títulos
+
+    $comp = json_decode((string)($it['composicao_json'] ?? ''), true);
+    if (is_array($comp) && $comp) {
+        foreach ($comp as $c) {
+            if ((float)($c['pc'] ?? 0) <= 0) continue;                 // artigo sem preço de custo (mão de obra)
+            $juntar($c['desc'] ?? '', $c['un'] ?? '', (float)($c['q'] ?? 0) * $qtd);
+        }
+        continue;
+    }
+
+    if ((float)($it['preco_unitario_custo'] ?? 0) <= 0) continue;     // mão de obra fica de fora
+    $juntar($it['designacao'] ?? '', $it['unidade'] ?? '', $qtd);
 }
 
 // Ordenar alfabeticamente pela designação (sem distinguir maiúsculas/acentos)
