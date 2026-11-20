@@ -3,7 +3,7 @@
 // NOTA: Terá de substituir estes valores pelos do seu painel de alojamento
 $host = '***'; 
 $dbname = '***';
-$username = '***'; // Substitua pelo utilizador do seu alojamento (ex: if0_41562631)
+$username = '***'; // Substitua pelo utilizador do seu alojamento (ex: if0_XXXXXXXX)
 $password = '***';     // Substitua pela palavra-passe da base de dados do alojamento
 
 try {
