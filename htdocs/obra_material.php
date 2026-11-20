@@ -8,19 +8,26 @@
 // Para acrescentar, apagar ou mudar material: na FAME.
 // Fornecimento (preenchido aqui): Qtd. fornecida, Nº do documento e Data do documento, por artigo.
 // Tabela obras_material_fornecido (id_obra + chave do artigo = designação|unidade|fabricante|referência).
+// Histórico: cada alteração ou limpeza de um fornecimento guarda antes o valor anterior em
+// obras_material_fornecido_hist (nunca se perdem dados).
 // =====================================================================
 session_start();
 require_once 'db.php';
+require_once 'functions.php';
 require_once 'obra_fame_comum.php';
 
+// REGRA DE OURO 1: validação de sessão
 if (!isset($_SESSION['user_id'])) { header("Location: index.php"); exit; }
+// REGRA DE OURO 2: acesso restrito pela matriz de permissões
 if (!fameTemAcesso($pdo)) { header("Location: index.php?erro=sem_permissao"); exit; }
 
+// REGRA DE OURO 3: primeiro nome no menu
 $nome_completo = $_SESSION['nome'] ?? 'Utilizador';
 $primeiro_nome = explode(' ', trim($nome_completo))[0];
 
 fameCriarTabelas($pdo);
 
+// REGRA DE OURO 5: ID validado como número inteiro
 $id_obra = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 $obra = $id_obra ? fameObra($pdo, $id_obra) : null;
 if (!$obra) { header("Location: obras.php"); exit; }
@@ -43,8 +50,25 @@ $pdo->exec("CREATE TABLE IF NOT EXISTS obras_material_fornecido (
     atualizado_em DATETIME NULL,
     UNIQUE KEY uk_obra_chave (id_obra, chave)
 ) DEFAULT CHARSET=utf8mb4");
+$pdo->exec("CREATE TABLE IF NOT EXISTS obras_material_fornecido_hist (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    id_obra INT NOT NULL,
+    chave VARCHAR(191) NOT NULL,
+    designacao VARCHAR(255) NULL,
+    unidade VARCHAR(10) NULL,
+    qtd_fornecida DECIMAL(12,2) NULL,
+    num_documento VARCHAR(80) NULL,
+    data_documento DATE NULL,
+    atualizado_por INT NULL,
+    atualizado_em DATETIME NULL,
+    acao VARCHAR(20) NOT NULL,
+    arquivado_por INT NULL,
+    arquivado_em DATETIME NOT NULL,
+    KEY idx_obra (id_obra)
+) DEFAULT CHARSET=utf8mb4");
 } catch (Exception $ex_t) {
-    $erro_tabela = $ex_t->getMessage();
+    error_log('obra_material.php (tabelas): ' . $ex_t->getMessage());
+    $erro_tabela = 'erro ao criar as tabelas';
 }
 // Chave do artigo (não depende da especialidade, para não se perder se a especialidade mudar na FAME)
 function chaveFornecido($m) {
@@ -52,8 +76,24 @@ function chaveFornecido($m) {
 }
 $mensagem = ''; $tipo_mensagem = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['gravar_fornecido'])) {
+    // REGRA DE OURO 7: token CSRF
+    if (!validar_csrf_token($_POST['csrf_token'] ?? '')) {
+        $mensagem = "A sessão expirou ou o pedido não é válido. Atualize a página e grave de novo."; $tipo_mensagem = 'erro';
+    } else
     try {
         $pdo->beginTransaction();
+        // Valores atuais (para só mexer no que mudou e guardar o anterior no histórico)
+        $st_a = $pdo->prepare("SELECT * FROM obras_material_fornecido WHERE id_obra = ?");
+        $st_a->execute([$id_obra]);
+        $atuais = [];
+        foreach ($st_a->fetchAll(PDO::FETCH_ASSOC) as $r) $atuais[$r['chave']] = $r;
+        $hist = $pdo->prepare("INSERT INTO obras_material_fornecido_hist (id_obra, chave, designacao, unidade, qtd_fornecida, num_documento, data_documento,
+                                   atualizado_por, atualizado_em, acao, arquivado_por, arquivado_em)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())");
+        $arquivar = function ($r, $acao) use ($hist) {
+            $hist->execute([$r['id_obra'], $r['chave'], $r['designacao'], $r['unidade'], $r['qtd_fornecida'], $r['num_documento'], $r['data_documento'],
+                            $r['atualizado_por'], $r['atualizado_em'], $acao, $_SESSION['user_id']]);
+        };
         $up = $pdo->prepare("INSERT INTO obras_material_fornecido (id_obra, chave, designacao, unidade, qtd_fornecida, num_documento, data_documento, atualizado_por, atualizado_em)
                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
                              ON DUPLICATE KEY UPDATE designacao = VALUES(designacao), unidade = VALUES(unidade), qtd_fornecida = VALUES(qtd_fornecida),
@@ -67,16 +107,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['gravar_fornecido'])) 
             $doc = mb_substr(trim((string)($f['doc'] ?? '')), 0, 80);
             $dt  = trim((string)($f['data'] ?? ''));
             if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $dt)) $dt = '';
-            if ($q === '' && $doc === '' && $dt === '') { $del->execute([$id_obra, $ch]); continue; }
+            $ant = $atuais[$ch] ?? null;
+            if ($q === '' && $doc === '' && $dt === '') {
+                // Campos limpos: o registo anterior vai para o histórico antes de sair da lista
+                if ($ant) { $arquivar($ant, 'limpo'); $del->execute([$id_obra, $ch]); }
+                continue;
+            }
+            $qn = $q === '' ? null : fameNum($q);
+            if ($ant) {
+                $igual = ((string)$ant['num_documento'] === $doc) && ((string)($ant['data_documento'] ?? '') === $dt)
+                      && (($ant['qtd_fornecida'] === null && $qn === null) || ($ant['qtd_fornecida'] !== null && $qn !== null && abs((float)$ant['qtd_fornecida'] - $qn) < 0.005));
+                if ($igual) continue;              // nada mudou neste artigo
+                $arquivar($ant, 'alterado');
+            }
             $up->execute([$id_obra, $ch, mb_substr((string)($f['desig'] ?? ''), 0, 255), mb_substr((string)($f['un'] ?? ''), 0, 10),
-                          $q === '' ? null : fameNum($q), $doc, $dt === '' ? null : $dt, $_SESSION['user_id']]);
+                          $qn, $doc, $dt === '' ? null : $dt, $_SESSION['user_id']]);
         }
         $pdo->commit();
         if (function_exists('registrarLog')) registrarLog($pdo, "Gravou material fornecido da obra ID: $id_obra", "Obras");
         header("Location: obra_material.php?id=" . $id_obra . "&gravado=1"); exit;
     } catch (Exception $ex) {
         if ($pdo->inTransaction()) $pdo->rollBack();
-        $mensagem = "Erro ao gravar: " . $ex->getMessage(); $tipo_mensagem = 'erro';
+        error_log('obra_material.php (gravar): ' . $ex->getMessage());
+        $mensagem = "Não foi possível gravar os fornecimentos. Tente de novo; se o erro continuar, avise o administrador."; $tipo_mensagem = 'erro';
     }
 }
 if (isset($_GET['gravado'])) { $mensagem = "Fornecimentos gravados."; $tipo_mensagem = 'sucesso'; }
@@ -95,9 +148,10 @@ try {
     $st_f->execute([$id_obra]);
     foreach ($st_f->fetchAll(PDO::FETCH_ASSOC) as $r) $fornecido[$r['chave']] = $r;
 } catch (Exception $ex_f) {
-    if ($erro_tabela === '') $erro_tabela = $ex_f->getMessage();
+    error_log('obra_material.php (ler): ' . $ex_f->getMessage());
+    if ($erro_tabela === '') $erro_tabela = 'erro ao ler';
 }
-if ($erro_tabela !== '' && $mensagem === '') { $mensagem = "Não foi possível preparar a tabela dos fornecimentos: " . $erro_tabela; $tipo_mensagem = 'erro'; }
+if ($erro_tabela !== '' && $mensagem === '') { $mensagem = "Não foi possível preparar a tabela dos fornecimentos. Avise o administrador."; $tipo_mensagem = 'erro'; }
 // Estado de cada artigo: completo / parcial / por fornecer
 $n_completos = 0; $n_parciais = 0; $chaves_lista = [];
 foreach ($grupos as $lista) foreach ($lista as $m) {
@@ -115,8 +169,11 @@ $ref_obra = $obra['referencia_obra'] ?: ($orc['numero_orcamento'] ?? (string)$id
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Material a aprovisionar - <?= $e($obra['nome']) ?> - Gestão MAB</title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         * { font-family: system-ui, -apple-system, sans-serif; box-sizing: border-box; }
@@ -259,7 +316,7 @@ $ref_obra = $obra['referencia_obra'] ?: ($orc['numero_orcamento'] ?? (string)$id
             </div>
         </div>
 
-        <?php if ($mensagem): ?><div class="alert alert-<?= $tipo_mensagem ?>"><?= $e($mensagem) ?></div><?php endif; ?>
+        <?php if ($mensagem): ?><div class="alert alert-<?= $e($tipo_mensagem) ?>"><?= $e($mensagem) ?></div><?php endif; ?>
 
         <?php if (!$fames): ?>
             <div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> A FAME desta obra ainda não tem linhas: a lista é o material do orçamento. Quando importar o material para a FAME, a lista passa a ser o da FAME, por especialidade.</div>
@@ -284,6 +341,8 @@ $ref_obra = $obra['referencia_obra'] ?: ($orc['numero_orcamento'] ?? (string)$id
             <?php endif; ?>
             <form method="POST" id="formForn" autocomplete="off">
             <input type="hidden" name="gravar_fornecido" value="1">
+            <?php /* REGRA DE OURO 7: token CSRF */ ?>
+            <input type="hidden" name="csrf_token" value="<?= $e(gerar_csrf_token()) ?>">
             <div class="card">
                 <div class="card-head">
                     <div class="resumo">
