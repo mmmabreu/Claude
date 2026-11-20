@@ -14,6 +14,11 @@ Estas regras ficam assinaladas nos comentários do código com `REGRA DE OURO`.
 5. **Validação rigorosa do ID**: qualquer ID que chegue pelo endereço (GET) é validado como número inteiro (ex.: `filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT)`) antes de ser usado.
 6. **Numerador global**: visita, orçamento, obra e termo partilham o mesmo número, com o formato AA + sequência (mínimo AA0100). O último número usado fica em `configuracoes.ultimo_numero_projeto`.
 7. **Token CSRF**: todos os formulários POST incluem `csrf_token` e o servidor valida-o.
+8. **Ícone MAB no separador**: todas as páginas mostram o ícone `mab.png` (raiz do servidor) no separador do navegador. No `<head>` de cada página, usar sempre caminho absoluto (com `/` inicial) e nunca `favicon.ico`:
+   ```html
+   <link rel="icon" type="image/png" href="/mab.png">
+   <link rel="apple-touch-icon" href="/mab.png">
+   ```
 
 ## 2. Regras de trabalho e de interface
 
