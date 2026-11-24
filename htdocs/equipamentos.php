@@ -328,6 +328,15 @@ foreach ($eq_individuais as $e_c) {
 $ordem_nome = fn($t) => strtr(mb_strtolower((string)$t, 'UTF-8'), ['á'=>'a','à'=>'a','â'=>'a','ã'=>'a','é'=>'e','ê'=>'e','í'=>'i','ó'=>'o','ô'=>'o','õ'=>'o','ú'=>'u','ç'=>'c']);
 uasort($colabs_com_eq, fn($a, $b) => strnatcmp($ordem_nome($a), $ordem_nome($b)));
 
+// Equipamento agrupado por colaborador (ordem alfabética); dentro de cada grupo, da entrega mais recente para a mais antiga
+$grupos_ind = [];
+foreach ($colabs_com_eq as $id_c => $nome_c) $grupos_ind[$id_c] = ['nome' => $nome_c, 'itens' => []];
+foreach ($eq_individuais as $e_g) {
+    $id_c = (int)($e_g['id_utilizador'] ?? 0);
+    if (!isset($grupos_ind[$id_c])) $grupos_ind[$id_c] = ['nome' => 'Sem colaborador', 'itens' => []];
+    $grupos_ind[$id_c]['itens'][] = $e_g;
+}
+
 // --- BUSCAR DADOS GERAIS (Apenas se for admin/administrativo) ---
 $eq_gerais = [];
 $movs_js = [];
@@ -462,6 +471,22 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
         .btn-sel-print:hover { background: #3c559c; border-color: #3c559c; }
         .btn-sel-print[disabled] { background: #fff; color: #95a5a6; border-color: #e1e5ea; cursor: default; }
         .sel-aviso { width: 100%; font-size: 12px; color: #7f8c8d; font-weight: 500; text-align: right; }
+        /* Grupos por colaborador (abrir / fechar) */
+        .grupo-cab { cursor: pointer; user-select: none; }
+        .grupo-cab td { background: #f8f9fb; border-top: 1px solid #e1e5ea; border-bottom: 1px solid #e1e5ea; padding: 12px 15px; }
+        .grupo-cab:hover td, .grupo-cab:focus td { background: #eef2fa; outline: none; }
+        .grupo-titulo { display: table-cell; }
+        .grupo-titulo .chev { color: #4a69bd; font-size: 12px; width: 16px; transition: transform 0.2s; }
+        tbody.grupo.aberto .chev { transform: rotate(90deg); }
+        .grupo-nome { font-weight: 800; color: #2c3e50; font-size: 15px; margin-right: 10px; }
+        .grupo-n { font-size: 12px; font-weight: 700; color: #4a69bd; background: #eef2fa; border: 1px solid #d9e2f3; padding: 2px 9px; border-radius: 12px; margin-right: 8px; white-space: nowrap; }
+        .grupo-ult { font-size: 12px; color: #95a5a6; white-space: nowrap; }
+        .grupo-marcados { font-size: 12px; font-weight: 700; color: #fff; background: #4a69bd; padding: 2px 9px; border-radius: 12px; margin-left: 8px; white-space: nowrap; }
+        .grupo-linhas.fechado { display: none !important; }
+        .grupo-linhas tr td:first-child { border-left: 3px solid #d9e2f3; }
+        .grupos-ctrl { display: flex; gap: 6px; }
+        .link-ctrl { background: none; border: none; color: #576574; font-size: 12px; font-weight: 700; cursor: pointer; padding: 6px 8px; border-radius: 6px; font-family: inherit; }
+        .link-ctrl:hover { background: #eef2fa; color: #4a69bd; }
         .ind-sel { padding: 6px 10px; border: 1px solid #cfd6de; border-radius: 20px; font-size: 12px; font-weight: 600; color: #34495e; background: #fff; font-family: inherit; max-width: 220px; }
         @media (max-width: 768px) { .card-header { flex-wrap: wrap; gap: 10px; } .ind-acoes { width: 100%; justify-content: stretch; } .ind-acoes > * { flex: 1; justify-content: center; max-width: none; } }
         @media (max-width: 560px) { .loc-print { margin-left: 0; width: 100%; justify-content: center; padding: 9px 14px; } }
@@ -548,6 +573,17 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
             tbody tr { background: #fff; border: 1px solid #e1e5ea; border-radius: 12px; margin-bottom: 12px; padding: 10px 0; position: relative; }
             td, td.text-center { border: none; padding: 4px 15px; text-align: left !important; }
             tr.selecionado { background: #f3f6fd; border-color: #4a69bd; }
+            /* Grupos no telemóvel */
+            tbody.grupo tr.grupo-cab { display: flex; align-items: center; padding: 4px 0; border: 1px solid #d9e2f3; border-left: 4px solid #4a69bd; background: #f8f9fb; margin-bottom: 10px; }
+            tbody.grupo tr.grupo-cab td { background: transparent; border: none; padding: 8px 12px; }
+            tbody.grupo tr.grupo-cab td.c-sel { position: static; order: 2; padding: 8px 12px 8px 0; }
+            tbody.grupo tr.grupo-cab td.grupo-titulo { flex: 1; line-height: 1.9; }
+            .grupo-l1 { display: block; line-height: 1.5; }
+            .grupo-l2 { display: block; padding-left: 20px; }
+            .grupo-linhas { padding-left: 10px; }
+            .grupo-linhas tr td:first-child { border-left: none; }
+            .grupos-ctrl { width: 100%; justify-content: flex-start; }
+            .ind-acoes > .grupos-ctrl { flex: 1 1 100%; }
             tr.selecionado td { background: transparent; }
             .ind-acoes > .sel-aviso { flex: 1 1 100%; }
             td[data-label]::before { content: attr(data-label) ": "; font-size: 11px; font-weight: 700; color: #95a5a6; text-transform: uppercase; }
@@ -616,6 +652,10 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                             <button type="button" class="btn-novo" onclick="abrirModalNovoInd()"><i class="fa-solid fa-plus"></i> Atribuir Novo</button>
                         <?php endif; ?>
                         <?php if (!empty($eq_individuais)): ?>
+                            <div class="grupos-ctrl">
+                                <button type="button" class="link-ctrl" onclick="abrirTodosGrupos(true)"><i class="fa-solid fa-angles-down"></i> Abrir todos</button>
+                                <button type="button" class="link-ctrl" onclick="abrirTodosGrupos(false)"><i class="fa-solid fa-angles-up"></i> Fechar todos</button>
+                            </div>
                             <div class="sel-aviso" id="selAviso"><i class="fa-regular fa-square-check"></i> Marque as entregas para as imprimir num só auto de entrega (uma folha por colaborador).</div>
                         <?php endif; ?>
                     </div>
@@ -627,7 +667,6 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                             <tr>
                                 <th class="c-sel"><input type="checkbox" id="selTodos" title="Marcar / desmarcar todos" onclick="selecionarTodos(this)"></th>
                                 <th style="width:100px;">Entrega</th>
-                                <?php if ($is_admin): ?><th>Colaborador</th><?php endif; ?>
                                 <th>Descrição do Equipamento</th>
                                 <th>Marca / Modelo</th>
                                 <th>Nº de Série</th>
@@ -636,11 +675,30 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                                 <th class="text-center" style="width:150px;">Ações</th>
                             </tr>
                         </thead>
+                        <?php if (empty($eq_individuais)): ?>
                         <tbody>
-                            <?php if (empty($eq_individuais)): ?>
-                                <tr><td colspan="<?= $is_admin ? 9 : 8 ?>" class="text-center" style="padding: 40px; color: #7f8c8d;">Nenhum equipamento registado.</td></tr>
-                            <?php else: ?>
-                                <?php foreach ($eq_individuais as $e): 
+                                <tr><td colspan="8" class="text-center" style="padding: 40px; color: #7f8c8d;">Nenhum equipamento registado.</td></tr>
+                        </tbody>
+                        <?php else: ?>
+                            <?php foreach ($grupos_ind as $id_grupo => $grupo):
+                                $n_itens = count($grupo['itens']);
+                                $ult_entrega = $grupo['itens'] ? date('d/m/Y', strtotime($grupo['itens'][0]['data_registo'])) : '';
+                                $grupo_aberto = !$is_admin;   // o colaborador vê logo o seu equipamento; a gestão começa com tudo fechado
+                            ?>
+                        <tbody class="grupo<?= $grupo_aberto ? ' aberto' : '' ?>" data-grupo="<?= (int)$id_grupo ?>">
+                            <tr class="grupo-cab" onclick="alternarGrupo(this)" tabindex="0" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); alternarGrupo(this); }" aria-expanded="<?= $grupo_aberto ? 'true' : 'false' ?>">
+                                <td class="c-sel"><input type="checkbox" class="sel-grupo" title="Marcar / desmarcar o equipamento de <?= htmlspecialchars($grupo['nome']) ?>" onclick="event.stopPropagation()" onchange="selecionarGrupo(this)"></td>
+                                <td colspan="7" class="grupo-titulo">
+                                    <span class="grupo-l1"><i class="fa-solid fa-chevron-right chev"></i>
+                                    <span class="grupo-nome"><?= htmlspecialchars($grupo['nome']) ?></span></span>
+                                    <span class="grupo-l2"><span class="grupo-n"><?= $n_itens ?> equipamento<?= $n_itens === 1 ? '' : 's' ?></span>
+                                    <?php if ($ult_entrega): ?><span class="grupo-ult">última entrega <?= $ult_entrega ?></span><?php endif; ?>
+                                    <span class="grupo-marcados" hidden></span></span>
+                                </td>
+                            </tr>
+                        </tbody>
+                        <tbody class="grupo-linhas<?= $grupo_aberto ? '' : ' fechado' ?>" id="g-<?= (int)$id_grupo ?>">
+                                <?php foreach ($grupo['itens'] as $e): 
                                     $classe_estado = 'estado-bom';
                                     if ($e['estado'] === 'Novo') $classe_estado = 'estado-novo';
                                     if ($e['estado'] === 'Usado') $classe_estado = 'estado-usado';
@@ -649,7 +707,6 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                                 <tr>
                                     <td class="c-sel"><input type="checkbox" class="sel-entrega" value="<?= (int)$e['id'] ?>" data-colab="<?= (int)$e['id_utilizador'] ?>" aria-label="Selecionar <?= htmlspecialchars($e['descricao']) ?>" onchange="atualizarSelecao()"></td>
                                     <td data-label="Entrega"><?= date('d/m/Y', strtotime($e['data_registo'])) ?></td>
-                                    <?php if ($is_admin): ?><td data-label="Colaborador"><strong style="color:#2c3e50;"><?= htmlspecialchars($e['nome_colaborador'] ?? 'N/D') ?></strong></td><?php endif; ?>
                                     <td class="c-titulo" style="font-weight:600; color:#4a69bd;"><?= htmlspecialchars($e['descricao']) ?></td>
                                     <td data-label="Marca / Modelo"><?= htmlspecialchars($e['marca']) ?></td>
                                     <td data-label="Nº de Série"><?= htmlspecialchars($e['numero_serie']) ?></td>
@@ -687,8 +744,9 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                                     </td>
                                 </tr>
                                 <?php endforeach; ?>
-                            <?php endif; ?>
                         </tbody>
+                            <?php endforeach; ?>
+                        <?php endif; ?>
                     </table>
                 </div>
             </div>
@@ -1221,9 +1279,47 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
             if (aviso) aviso.innerHTML = n === 0
                 ? '<i class="fa-regular fa-square-check"></i> Marque as entregas para as imprimir num só auto de entrega (uma folha por colaborador).'
                 : '<i class="fa-solid fa-square-check"></i> ' + n + ' entrega(s) marcada(s)' + (nc > 1 ? ' de ' + nc + ' colaboradores: sai uma folha para cada um.' : ' — sai numa só folha.');
+            // Estado da caixa de cada grupo e nº de marcados (visível mesmo com o grupo fechado)
+            document.querySelectorAll('tbody.grupo').forEach(function (tb) {
+                var linhas = document.getElementById('g-' + tb.dataset.grupo); if (!linhas) return;
+                var tot = linhas.querySelectorAll('.sel-entrega').length, mar = linhas.querySelectorAll('.sel-entrega:checked').length;
+                var cg = tb.querySelector('.sel-grupo'); if (cg) { cg.checked = (mar > 0 && mar === tot); cg.indeterminate = (mar > 0 && mar < tot); }
+                var badge = tb.querySelector('.grupo-marcados'); if (badge) { badge.hidden = (mar === 0); badge.textContent = mar + ' marcado' + (mar === 1 ? '' : 's'); }
+            });
             var todos = document.getElementById('selTodos'), total = document.querySelectorAll('.sel-entrega').length;
             if (todos) { todos.checked = (n > 0 && n === total); todos.indeterminate = (n > 0 && n < total); }
         }
+        // Grupos por colaborador: abrir / fechar (fica lembrado enquanto o separador do browser estiver aberto)
+        function gruposAbertosGuardados() { try { return JSON.parse(sessionStorage.getItem('eq_grupos_abertos') || 'null'); } catch (e) { return null; } }
+        function guardarGruposAbertos() {
+            var abertos = Array.prototype.map.call(document.querySelectorAll('tbody.grupo.aberto'), function (t) { return t.dataset.grupo; });
+            try { sessionStorage.setItem('eq_grupos_abertos', JSON.stringify(abertos)); } catch (e) {}
+        }
+        function definirGrupo(tb, abrir) {
+            var linhas = document.getElementById('g-' + tb.dataset.grupo);
+            tb.classList.toggle('aberto', abrir);
+            if (linhas) linhas.classList.toggle('fechado', !abrir);
+            var cab = tb.querySelector('.grupo-cab'); if (cab) cab.setAttribute('aria-expanded', abrir ? 'true' : 'false');
+        }
+        function alternarGrupo(cab) {
+            var tb = cab.closest('tbody.grupo');
+            definirGrupo(tb, !tb.classList.contains('aberto'));
+            guardarGruposAbertos();
+        }
+        function abrirTodosGrupos(abrir) {
+            document.querySelectorAll('tbody.grupo').forEach(function (tb) { definirGrupo(tb, abrir); });
+            guardarGruposAbertos();
+        }
+        function selecionarGrupo(chk) {
+            var linhas = document.getElementById('g-' + chk.closest('tbody.grupo').dataset.grupo);
+            if (linhas) linhas.querySelectorAll('.sel-entrega').forEach(function (c) { c.checked = chk.checked; });
+            atualizarSelecao();
+        }
+        (function () {
+            var guardados = gruposAbertosGuardados();
+            if (guardados) document.querySelectorAll('tbody.grupo').forEach(function (tb) { definirGrupo(tb, guardados.indexOf(tb.dataset.grupo) !== -1); });
+        })();
+
         function selecionarTodos(chk) {
             document.querySelectorAll('.sel-entrega').forEach(function (c) { c.checked = chk.checked; });
             atualizarSelecao();
