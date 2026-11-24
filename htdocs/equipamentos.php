@@ -8,10 +8,39 @@ if (!isset($_SESSION['user_id'])) {
     exit; 
 }
 
-if (file_exists('functions.php')) { 
-    require_once 'functions.php'; 
-} else { 
-    function registrarLog($pdo, $acao, $modulo) { return true; } 
+require_once 'functions.php';
+
+// REGRA DE OURO 7: token CSRF em todos os formulários (validado antes de gravar seja o que for)
+$csrf_falhou = ($_SERVER['REQUEST_METHOD'] === 'POST' && !validar_csrf_token($_POST['csrf_token'] ?? ''));
+
+// NUNCA PERDER DADOS: antes de alterar ou apagar um equipamento, guarda uma cópia completa
+// (com o histórico de movimentos) em equipamentos_arquivo. Se não conseguir arquivar, não altera.
+// (a tabela é criada fora das transações: no MySQL, CREATE TABLE fecha a transação aberta)
+function criarTabelaArquivoEquipamentos($pdo) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS equipamentos_arquivo (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        id_equipamento INT NOT NULL,
+        acao VARCHAR(20) NOT NULL,
+        dados_json MEDIUMTEXT NOT NULL,
+        movimentos_json MEDIUMTEXT NULL,
+        arquivado_por INT NULL,
+        arquivado_em DATETIME NOT NULL,
+        KEY idx_equipamento (id_equipamento)
+    ) DEFAULT CHARSET=utf8mb4");
+}
+function arquivarEquipamento($pdo, $id_equipamento, $acao, $id_user) {
+    $st = $pdo->prepare("SELECT * FROM equipamentos WHERE id = ?");
+    $st->execute([$id_equipamento]);
+    $dados = $st->fetch(PDO::FETCH_ASSOC);
+    if (!$dados) return;
+    $movs = null;
+    try {
+        $st_m = $pdo->prepare("SELECT * FROM equipamentos_movimentos WHERE id_equipamento = ? ORDER BY id ASC");
+        $st_m->execute([$id_equipamento]);
+        $movs = $st_m->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Exception $e) { $movs = null; }
+    $pdo->prepare("INSERT INTO equipamentos_arquivo (id_equipamento, acao, dados_json, movimentos_json, arquivado_por, arquivado_em) VALUES (?, ?, ?, ?, ?, NOW())")
+        ->execute([$id_equipamento, $acao, safe_json_encode($dados), $movs === null ? null : safe_json_encode($movs), $id_user]);
 }
 
 // Regista uma linha de movimento/localização do equipamento geral
@@ -25,6 +54,9 @@ if (!function_exists('registarMovimento')) {
 
 $perfil_user = $_SESSION['perfil'] ?? '';
 $is_admin = in_array($perfil_user, ['admin', 'administrativo']);
+if ($is_admin) {
+    try { criarTabelaArquivoEquipamentos($pdo); } catch (Exception $e) { error_log('equipamentos.php (arquivo): ' . $e->getMessage()); }
+}
 
 // REGRA DE OURO 2: Acesso Restrito pela Matriz
 $stmt_perm = $pdo->prepare("SELECT modulo FROM permissoes WHERE grupo = :perfil AND pode_aceder = 1");
@@ -64,7 +96,7 @@ if ($is_admin) {
 }
 
 // --- PROCESSAR NOVO EQUIPAMENTO INDIVIDUAL ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_gravar_individual'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$csrf_falhou && isset($_POST['btn_gravar_individual'])) {
     $data_registo = $_POST['data_registo'];
     $id_utilizador = $_POST['id_utilizador'];
     $descricao = trim($_POST['descricao']);
@@ -80,12 +112,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_gravar_individual
         registrarLog($pdo, "Atribuiu equipamento ($descricao) a colaborador", "Equipamentos");
         $mensagem = "Equipamento atribuído com sucesso!"; $tipo_mensagem = "sucesso";
     } catch (Exception $e) {
-        $mensagem = "Erro: " . $e->getMessage(); $tipo_mensagem = "erro";
+        error_log('equipamentos.php: ' . $e->getMessage()); $mensagem = "Não foi possível gravar. Tente de novo; se o erro continuar, avise o administrador."; $tipo_mensagem = "erro";
     }
 }
 
 // --- PROCESSAR EDIÇÃO DE EQUIPAMENTO INDIVIDUAL ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_editar_individual'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$csrf_falhou && isset($_POST['btn_editar_individual'])) {
     $id_editar = filter_input(INPUT_POST, 'id_editar', FILTER_VALIDATE_INT);
     $data_registo = $_POST['data_registo'];
     $id_utilizador = $_POST['id_utilizador'];
@@ -99,19 +131,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_editar_individual
         $mensagem = "Erro: Apenas administradores podem editar."; $tipo_mensagem = "erro";
     } else {
         try {
+            arquivarEquipamento($pdo, $id_editar, 'editado', $id_utilizador_logado);
             $sql = "UPDATE equipamentos SET data_registo = ?, id_utilizador = ?, descricao = ?, marca = ?, numero_serie = ?, estado = ?, observacoes = ? WHERE id = ? AND tipo = 'individual'";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$data_registo, $id_utilizador, $descricao, $marca, $numero_serie, $estado, $observacoes, $id_editar]);
             registrarLog($pdo, "Editou equipamento individual ($descricao)", "Equipamentos");
             $mensagem = "Equipamento atualizado com sucesso!"; $tipo_mensagem = "sucesso";
         } catch (Exception $e) {
-            $mensagem = "Erro: " . $e->getMessage(); $tipo_mensagem = "erro";
+            error_log('equipamentos.php: ' . $e->getMessage()); $mensagem = "Não foi possível gravar. Tente de novo; se o erro continuar, avise o administrador."; $tipo_mensagem = "erro";
         }
     }
 }
 
 // --- PROCESSAR NOVO EQUIPAMENTO GERAL ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_gravar_geral'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$csrf_falhou && isset($_POST['btn_gravar_geral'])) {
     $data_registo = $_POST['data_registo'];
     $descricao = trim($_POST['descricao']);
     $marca = trim($_POST['marca']);
@@ -161,13 +194,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_gravar_geral'])) 
 
             $mensagem = "Equipamento geral guardado com sucesso!"; $tipo_mensagem = "sucesso";
         } catch (Exception $e) {
-            $mensagem = "Erro: " . $e->getMessage(); $tipo_mensagem = "erro";
+            error_log('equipamentos.php: ' . $e->getMessage()); $mensagem = "Não foi possível gravar. Tente de novo; se o erro continuar, avise o administrador."; $tipo_mensagem = "erro";
         }
     }
 }
 
 // --- PROCESSAR EDICAO DE EQUIPAMENTO GERAL ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_editar_geral'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$csrf_falhou && isset($_POST['btn_editar_geral'])) {
     $id_editar = filter_input(INPUT_POST, 'id_editar', FILTER_VALIDATE_INT);
     $data_registo = $_POST['data_registo'];
     $descricao = trim($_POST['descricao']);
@@ -212,6 +245,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_editar_geral'])) 
                 $atual = $stmt_cur->fetch(PDO::FETCH_ASSOC);
             }
 
+            arquivarEquipamento($pdo, $id_editar, 'editado', $id_utilizador_logado);
             $sql = "UPDATE equipamentos SET data_registo = ?, descricao = ?, marca = ?, numero_serie = ?, fornecedor = ?, observacoes = ?, localizacao = ?, id_cliente = ?, id_obra = ?, id_colaborador_levou = ?, emprestado_nome = ? WHERE id = ? AND tipo = 'geral'";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$data_registo, $descricao, $marca, $numero_serie, $fornecedor, $observacoes, $localizacao, $loc_id_cliente, $loc_id_obra, $loc_id_colab, $loc_emp_nome, $id_editar]);
@@ -233,13 +267,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_editar_geral'])) 
 
             $mensagem = "Equipamento geral atualizado com sucesso!"; $tipo_mensagem = "sucesso";
         } catch (Exception $e) {
-            $mensagem = "Erro: " . $e->getMessage(); $tipo_mensagem = "erro";
+            error_log('equipamentos.php: ' . $e->getMessage()); $mensagem = "Não foi possível gravar. Tente de novo; se o erro continuar, avise o administrador."; $tipo_mensagem = "erro";
         }
     }
 }
 
 // --- APAGAR EQUIPAMENTO ---
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_confirmar_apagar'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$csrf_falhou && isset($_POST['btn_confirmar_apagar'])) {
     if (!$is_admin) {
         $mensagem = "Erro: Apenas administradores podem apagar."; $tipo_mensagem = "erro";
     } else {
@@ -250,22 +284,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_confirmar_apagar'
         $stmt_pass->execute(); 
         $pass_config = $stmt_pass->fetchColumn();
 
-        if ($pass_introduzida !== $pass_config || empty($pass_introduzida)) { 
+        if (empty($pass_introduzida) || !hash_equals((string)$pass_config, (string)$pass_introduzida)) { 
             $mensagem = "Password de segurança incorreta."; $tipo_mensagem = "erro"; 
         } else {
             try {
+                $pdo->beginTransaction();
+                arquivarEquipamento($pdo, $id_apagar, 'apagado', $id_utilizador_logado);
                 if ($tem_historico) {
                     $pdo->prepare("DELETE FROM equipamentos_movimentos WHERE id_equipamento = ?")->execute([$id_apagar]);
                 }
                 $pdo->prepare("DELETE FROM equipamentos WHERE id = ?")->execute([$id_apagar]);
+                $pdo->commit();
                 registrarLog($pdo, "Apagou equipamento (ID: $id_apagar)", "Equipamentos");
                 $mensagem = "Equipamento removido com sucesso."; $tipo_mensagem = "sucesso"; 
             } catch (Exception $e) {
-                $mensagem = "Erro ao apagar: " . htmlspecialchars($e->getMessage()); $tipo_mensagem = "erro"; 
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                error_log('equipamentos.php (apagar): ' . $e->getMessage());
+                $mensagem = "Não foi possível apagar o equipamento. Nada foi alterado."; $tipo_mensagem = "erro"; 
             }
         }
     }
 }
+
+if ($csrf_falhou) { $mensagem = "A sessão expirou ou o pedido não é válido. Atualize a página e tente de novo."; $tipo_mensagem = "erro"; }
 
 // --- BUSCAR DADOS INDIVIDUAIS ---
 $params_ind = [];
@@ -350,8 +391,11 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Equipamentos - Gestão MAB</title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; background-color: #f7f9fc; margin: 0; color: #333; padding-bottom: 50px; }
@@ -363,8 +407,9 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
         .topbar-center { display: flex; align-items: center; gap: 20px; flex: 1;}
         .topbar-right { display: flex; align-items: center; gap: 30px; }
         
-        .btn-back { color: #576574; text-decoration: none; font-weight: 500; display: flex; align-items: center; gap: 6px; font-size: 15px;}
-        .btn-back:hover { color: #4a69bd; } 
+        .btn-voltar { width: 40px; height: 40px; border-radius: 50%; background: #fff; border: 1px solid #e8ecf1; color: #576574; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; font-size: 16px; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.04); flex-shrink: 0; }
+        .btn-voltar:hover { background: #eef2f6; color: #34495e; border-color: #d5dce4; transform: translateX(-2px); }
+        .btn-voltar:active { transform: scale(0.94); }
         
         .user-menu { position: relative; display: inline-block;}
         .user-btn { background: none; border: none; font-size: 15px; font-weight: 600; color: #2c3e50; cursor: pointer; display: flex; align-items: center; gap: 8px; }
@@ -373,7 +418,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
         .dropdown-content { display: none; position: absolute; right: 0; top: 100%; margin-top: 10px; background: #fff; min-width: 180px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; border: 1px solid #f1f2f6; z-index:200;}
         .dropdown-content a { color: #576574; padding: 12px 20px; text-decoration: none; display: block; font-size: 14px; }
         .dropdown-content a:hover { background: #fdf2f2; color: #4a69bd; }
-        .user-menu:hover .dropdown-content { display: block; }
+        .user-menu:hover .dropdown-content, .user-menu.aberto .dropdown-content { display: block; }
 
         .container { max-width: 1300px; margin: 30px auto; padding: 0 15px; }
         .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; flex-wrap: wrap; gap: 15px; }
@@ -409,6 +454,14 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
         .loc-print:hover { background: #34495e; color: #fff; border-color: #34495e; }
         .ind-acoes { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .ind-print { margin-left: 0; }
+        /* Seleção de entregas para imprimir num só auto */
+        .c-sel { width: 42px; text-align: center; }
+        .c-sel input { width: 18px; height: 18px; cursor: pointer; accent-color: #4a69bd; vertical-align: middle; }
+        tr.selecionado td { background: #f3f6fd; }
+        .btn-sel-print { background: #4a69bd; color: #fff; border-color: #4a69bd; cursor: pointer; font-family: inherit; }
+        .btn-sel-print:hover { background: #3c559c; border-color: #3c559c; }
+        .btn-sel-print[disabled] { background: #fff; color: #95a5a6; border-color: #e1e5ea; cursor: default; }
+        .sel-aviso { width: 100%; font-size: 12px; color: #7f8c8d; font-weight: 500; text-align: right; }
         .ind-sel { padding: 6px 10px; border: 1px solid #cfd6de; border-radius: 20px; font-size: 12px; font-weight: 600; color: #34495e; background: #fff; font-family: inherit; max-width: 220px; }
         @media (max-width: 768px) { .card-header { flex-wrap: wrap; gap: 10px; } .ind-acoes { width: 100%; justify-content: stretch; } .ind-acoes > * { flex: 1; justify-content: center; max-width: none; } }
         @media (max-width: 560px) { .loc-print { margin-left: 0; width: 100%; justify-content: center; padding: 9px 14px; } }
@@ -480,9 +533,30 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
         .hist-registo { font-size: 11px; color: #95a5a6; margin-top: 4px; }
 
         @media (max-width: 768px) {
-            .btn-back-text { display: none; }
-            .topbar { padding: 15px 20px; }
+            .topbar { padding: 12px 15px; }
+            .topbar-right { gap: 12px; }
+            .btn-voltar { width: 38px; height: 38px; }
+            .user-nome { display: none; }
             .form-grid { grid-template-columns: 1fr; }
+            .card { padding: 15px; }
+            .sel-aviso { text-align: left; }
+            /* Tabelas passam a cartões */
+            .table-responsive { border: none; overflow: visible; }
+            table { min-width: 0; background: transparent; }
+            thead { display: none; }
+            table, tbody, tr, td { display: block; width: 100%; }
+            tbody tr { background: #fff; border: 1px solid #e1e5ea; border-radius: 12px; margin-bottom: 12px; padding: 10px 0; position: relative; }
+            td, td.text-center { border: none; padding: 4px 15px; text-align: left !important; }
+            tr.selecionado { background: #f3f6fd; border-color: #4a69bd; }
+            tr.selecionado td { background: transparent; }
+            .ind-acoes > .sel-aviso { flex: 1 1 100%; }
+            td[data-label]::before { content: attr(data-label) ": "; font-size: 11px; font-weight: 700; color: #95a5a6; text-transform: uppercase; }
+            td.c-titulo { font-size: 15px; padding-right: 55px; }
+            td.c-sel { position: absolute; top: 8px; right: 8px; width: auto; padding: 6px; }
+            td.c-sel input { width: 22px; height: 22px; }
+            td.c-acoes { padding-top: 10px; }
+            .acoes-coluna { justify-content: flex-start; }
+            td:empty { display: none; }
         }
     </style>
 </head>
@@ -491,11 +565,11 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
     <header class="topbar">
         <div class="topbar-left"><a href="index.php"><img src="mab.png" alt="MAB" class="logo"></a></div>
         <div class="topbar-center"></div> <div class="topbar-right">
-            <a href="index.php" class="btn-back" title="Voltar"><i class="fa-solid fa-arrow-left"></i> <span class="btn-back-text">Voltar</span></a>
+            <a href="index.php" class="btn-voltar" title="Voltar" aria-label="Voltar"><i class="fa-solid fa-arrow-left"></i></a>
             <div class="user-menu">
-                <button class="user-btn">
+                <button type="button" class="user-btn">
                     <div class="user-avatar"><i class="fa-solid fa-user"></i></div>
-                    <?= htmlspecialchars($primeiro_nome) ?> 
+                    <span class="user-nome"><?= htmlspecialchars($primeiro_nome) ?></span> 
                     <i class="fa-solid fa-chevron-down" style="font-size: 10px;"></i>
                 </button>
                 <div class="dropdown-content">
@@ -535,10 +609,14 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                                     <?php foreach ($colabs_com_eq as $id_c => $nome_c): ?><option value="<?= $id_c ?>"><?= htmlspecialchars($nome_c) ?></option><?php endforeach; ?>
                                 </select>
                             <?php endif; ?>
+                            <button type="button" id="btnImprimirSel" class="loc-print ind-print btn-sel-print" onclick="imprimirSelecionados()" disabled title="Marque na lista as entregas a imprimir num só auto de entrega"><i class="fa-solid fa-file-signature"></i> <span>Auto de entrega (<span id="nSel">0</span>)</span></button>
                             <a id="btnImprimirInd" href="equipamentos_colaboradores_pdf.php" target="_blank" class="loc-print ind-print" title="Imprimir o equipamento entregue, por colaborador (ordem alfabética) e por data de entrega"><i class="fa-solid fa-print"></i> Imprimir</a>
                         <?php endif; ?>
                         <?php if ($is_admin): ?>
                             <button type="button" class="btn-novo" onclick="abrirModalNovoInd()"><i class="fa-solid fa-plus"></i> Atribuir Novo</button>
+                        <?php endif; ?>
+                        <?php if (!empty($eq_individuais)): ?>
+                            <div class="sel-aviso" id="selAviso"><i class="fa-regular fa-square-check"></i> Marque as entregas para as imprimir num só auto de entrega (uma folha por colaborador).</div>
                         <?php endif; ?>
                     </div>
                 </div>
@@ -547,6 +625,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                     <table>
                         <thead>
                             <tr>
+                                <th class="c-sel"><input type="checkbox" id="selTodos" title="Marcar / desmarcar todos" onclick="selecionarTodos(this)"></th>
                                 <th style="width:100px;">Entrega</th>
                                 <?php if ($is_admin): ?><th>Colaborador</th><?php endif; ?>
                                 <th>Descrição do Equipamento</th>
@@ -559,7 +638,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                         </thead>
                         <tbody>
                             <?php if (empty($eq_individuais)): ?>
-                                <tr><td colspan="<?= $is_admin ? 8 : 7 ?>" class="text-center" style="padding: 40px; color: #7f8c8d;">Nenhum equipamento registado.</td></tr>
+                                <tr><td colspan="<?= $is_admin ? 9 : 8 ?>" class="text-center" style="padding: 40px; color: #7f8c8d;">Nenhum equipamento registado.</td></tr>
                             <?php else: ?>
                                 <?php foreach ($eq_individuais as $e): 
                                     $classe_estado = 'estado-bom';
@@ -568,15 +647,16 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                                     if ($e['estado'] === 'Avariado') $classe_estado = 'estado-avariado';
                                 ?>
                                 <tr>
-                                    <td><?= date('d/m/Y', strtotime($e['data_registo'])) ?></td>
-                                    <?php if ($is_admin): ?><td><strong style="color:#2c3e50;"><?= htmlspecialchars($e['nome_colaborador'] ?? 'N/D') ?></strong></td><?php endif; ?>
-                                    <td style="font-weight:600; color:#4a69bd;"><?= htmlspecialchars($e['descricao']) ?></td>
-                                    <td><?= htmlspecialchars($e['marca']) ?></td>
-                                    <td><?= htmlspecialchars($e['numero_serie']) ?></td>
-                                    <td class="text-center"><span class="badge-estado <?= $classe_estado ?>"><?= htmlspecialchars($e['estado']) ?></span></td>
+                                    <td class="c-sel"><input type="checkbox" class="sel-entrega" value="<?= (int)$e['id'] ?>" data-colab="<?= (int)$e['id_utilizador'] ?>" aria-label="Selecionar <?= htmlspecialchars($e['descricao']) ?>" onchange="atualizarSelecao()"></td>
+                                    <td data-label="Entrega"><?= date('d/m/Y', strtotime($e['data_registo'])) ?></td>
+                                    <?php if ($is_admin): ?><td data-label="Colaborador"><strong style="color:#2c3e50;"><?= htmlspecialchars($e['nome_colaborador'] ?? 'N/D') ?></strong></td><?php endif; ?>
+                                    <td class="c-titulo" style="font-weight:600; color:#4a69bd;"><?= htmlspecialchars($e['descricao']) ?></td>
+                                    <td data-label="Marca / Modelo"><?= htmlspecialchars($e['marca']) ?></td>
+                                    <td data-label="Nº de Série"><?= htmlspecialchars($e['numero_serie']) ?></td>
+                                    <td data-label="Estado" class="text-center"><span class="badge-estado <?= $classe_estado ?>"><?= htmlspecialchars($e['estado']) ?></span></td>
                                     <td style="font-size:12px; color:#7f8c8d;"><?= htmlspecialchars($e['observacoes']) ?></td>
                                     
-                                    <td class="text-center">
+                                    <td class="text-center c-acoes">
                                         <div class="acoes-coluna">
                                             <a href="equipamento_pdf.php?id=<?= $e['id'] ?>" target="_blank" class="btn-tab-acao btn-imprimir" title="Imprimir Auto de Entrega"><i class="fa-solid fa-print"></i></a>
                                             <?php if ($is_admin): ?>
@@ -661,12 +741,12 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                                     }
                                 ?>
                                 <tr data-loc="<?= htmlspecialchars($loc) ?>">
-                                    <td><?= date('d/m/Y', strtotime($e['data_registo'])) ?></td>
-                                    <td style="font-weight:600; color:#4a69bd;"><?= htmlspecialchars($e['descricao']) ?></td>
-                                    <td><?= htmlspecialchars($e['marca']) ?></td>
-                                    <td><?= htmlspecialchars($e['numero_serie']) ?></td>
-                                    <td><?= htmlspecialchars($e['fornecedor']) ?></td>
-                                    <td>
+                                    <td data-label="Data Compra"><?= date('d/m/Y', strtotime($e['data_registo'])) ?></td>
+                                    <td class="c-titulo" style="font-weight:600; color:#4a69bd;"><?= htmlspecialchars($e['descricao']) ?></td>
+                                    <td data-label="Marca / Modelo"><?= htmlspecialchars($e['marca']) ?></td>
+                                    <td data-label="Nº de Série"><?= htmlspecialchars($e['numero_serie']) ?></td>
+                                    <td data-label="Fornecedor"><?= htmlspecialchars($e['fornecedor']) ?></td>
+                                    <td data-label="Localização">
                                         <span class="badge-estado <?= $loc_class ?>"><?= $loc_label ?></span>
                                         <?php if (!empty($movs_js[(int)$e['id']][0]['data'])): ?>
                                             <div style="font-size:11px; color:#4a69bd; margin-top:5px; font-weight:600;"><i class="fa-regular fa-calendar"></i> desde <?= htmlspecialchars($movs_js[(int)$e['id']][0]['data']) ?></div>
@@ -683,7 +763,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                                         <?php endif; ?>
                                     </td>
                                     <td style="font-size:12px; color:#7f8c8d;"><?= htmlspecialchars($e['observacoes']) ?></td>
-                                    <td class="text-center">
+                                    <td class="text-center c-acoes">
                                         <div class="acoes-coluna">
                                             <button type="button" class="btn-tab-acao btn-hist" title="Histórico de movimentos"
                                                 data-id="<?= $e['id'] ?>" data-desc="<?= htmlspecialchars($e['descricao']) ?>"
@@ -731,6 +811,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                 <button type="button" class="close-btn" onclick="fecharModais()">&times;</button>
             </div>
             <form method="POST" id="formInd">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
                 <div class="form-grid">
                     <div class="form-group full">
                         <label>Colaborador *</label>
@@ -794,6 +875,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                 <button type="button" class="close-btn" onclick="fecharModais()">&times;</button>
             </div>
             <form method="POST">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
                 <input type="hidden" name="id_editar" id="edit_id_ind">
                 <div class="form-grid">
                     <div class="form-group full">
@@ -858,6 +940,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                 <button type="button" class="close-btn" onclick="fecharModais()">&times;</button>
             </div>
             <form method="POST">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
                 <div class="form-grid">
                     <div class="form-group full">
                         <label>Descrição da Máquina / Equipamento *</label>
@@ -947,6 +1030,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
                 <button type="button" class="close-btn" onclick="fecharModais()">&times;</button>
             </div>
             <form method="POST">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
                 <input type="hidden" name="id_editar" id="edit_id_geral">
                 
                 <div class="form-grid">
@@ -1058,6 +1142,7 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
             </div>
             <p style="margin-top:0;">Deseja apagar definitivamente este equipamento?</p>
             <form method="POST">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
                 <input type="hidden" name="id_apagar" id="id_apagar_input">
                 <input type="password" name="pass_seguranca" required placeholder="Password de Segurança" style="width:100%; padding:12px; border:1px solid #dcdde1; border-radius:8px; margin: 15px 0;">
                 <input type="hidden" name="aba" id="apagar_aba" value="individual">
@@ -1123,6 +1208,38 @@ $aba_ativa = (($_POST['aba'] ?? '') === 'geral' && $is_admin) ? 'geral' : 'indiv
             if (!a) return;
             a.href = 'equipamentos_colaboradores_pdf.php' + (sel && sel.value ? '?colab=' + sel.value : '');
         }
+
+        // Auto de entrega com várias entregas: marca as linhas e imprime tudo num só documento
+        function atualizarSelecao() {
+            var marcados = document.querySelectorAll('.sel-entrega:checked');
+            var n = marcados.length;
+            document.getElementById('nSel').textContent = n;
+            document.getElementById('btnImprimirSel').disabled = (n === 0);
+            document.querySelectorAll('.sel-entrega').forEach(function (c) { c.closest('tr').classList.toggle('selecionado', c.checked); });
+            var colabs = {}; marcados.forEach(function (c) { colabs[c.dataset.colab] = 1; });
+            var nc = Object.keys(colabs).length, aviso = document.getElementById('selAviso');
+            if (aviso) aviso.innerHTML = n === 0
+                ? '<i class="fa-regular fa-square-check"></i> Marque as entregas para as imprimir num só auto de entrega (uma folha por colaborador).'
+                : '<i class="fa-solid fa-square-check"></i> ' + n + ' entrega(s) marcada(s)' + (nc > 1 ? ' de ' + nc + ' colaboradores: sai uma folha para cada um.' : ' — sai numa só folha.');
+            var todos = document.getElementById('selTodos'), total = document.querySelectorAll('.sel-entrega').length;
+            if (todos) { todos.checked = (n > 0 && n === total); todos.indeterminate = (n > 0 && n < total); }
+        }
+        function selecionarTodos(chk) {
+            document.querySelectorAll('.sel-entrega').forEach(function (c) { c.checked = chk.checked; });
+            atualizarSelecao();
+        }
+        function imprimirSelecionados() {
+            var ids = Array.prototype.map.call(document.querySelectorAll('.sel-entrega:checked'), function (c) { return c.value; });
+            if (!ids.length) return;
+            window.open('equipamento_pdf.php?ids=' + ids.join(','), '_blank');
+        }
+
+        // Menu do utilizador (toque em ecrãs táteis)
+        (function () {
+            var menu = document.querySelector('.user-menu'); if (!menu) return;
+            menu.querySelector('.user-btn').addEventListener('click', function (e) { e.stopPropagation(); menu.classList.toggle('aberto'); });
+            document.addEventListener('click', function () { menu.classList.remove('aberto'); });
+        })();
 
         // Filtro rápido da lista do Equipamento Geral por localização
         function filtrarLista(btn, loc) {
