@@ -2,6 +2,9 @@
 // REGRA DE OURO 4: Limpar qualquer espaço em branco ou lixo antes de gerar o PDF
 ob_start();
 session_start();
+// Fotografias grandes do telemóvel precisam de memória para serem reduzidas/endireitadas
+@ini_set('memory_limit', '256M');
+@set_time_limit(120);
 
 // REGRA DE OURO 1: Validação de sessão
 if (!isset($_SESSION['user_id'])) {
@@ -185,21 +188,31 @@ function desenharFotos($pdf, $ficheiros, $por_linha, $h_max) {
     $w_cel = ($largura_util - ($por_linha - 1) * $espaco) / $por_linha;
     $fotos = [];
     foreach ($ficheiros as $f) {
-        $p = fotoParaPdf($f);
-        if (!$p) continue;
+        // Foto em falta ou ilegível: fica um quadro com o nome (para se perceber qual é, em vez de desaparecer)
+        $p = is_file($f) ? fotoParaPdf($f) : null;
+        if (!$p) { $fotos[] = [null, $w_cel, 22, basename($f), is_file($f) ? 'Foto ilegível' : 'Foto em falta no servidor']; continue; }
         [$fich, $pw, $ph] = $p;
         $w = $w_cel; $h = $w * $ph / $pw;
         if ($h > $h_max) { $h = $h_max; $w = $h * $pw / $ph; }
-        $fotos[] = [$fich, $w, $h];
+        $fotos[] = [$fich, $w, $h, basename($f), ''];
     }
     if (!$fotos) return;
     foreach (array_chunk($fotos, $por_linha) as $linha) {
         $alt = max(array_column($linha, 2));
         $y = $pdf->GetY();
         if ($y + $alt > $limite) { $pdf->AddPage(); $y = $pdf->GetY(); }
-        foreach ($linha as $i => [$fich, $w, $h]) {
+        foreach ($linha as $i => [$fich, $w, $h, $nome, $motivo]) {
             $x = $x0 + $i * ($w_cel + $espaco) + ($w_cel - $w) / 2;
-            try { $pdf->Image($fich, $x, $y, $w, $h); } catch (Exception $e) { error_log('visita_pdf.php (foto ' . $fich . '): ' . $e->getMessage()); }
+            if ($fich) {
+                try { $pdf->Image($fich, $x, $y, $w, $h); continue; }
+                catch (Exception $e) { error_log('visita_pdf.php (foto ' . $fich . '): ' . $e->getMessage()); $motivo = 'Foto ilegível'; $h = min($h, 22); }
+            }
+            $pdf->SetDrawColor(200, 200, 200); $pdf->SetFillColor(248, 249, 250);
+            $pdf->Rect($x, $y, $w, $h, 'DF');
+            $pdf->SetTextColor(150, 150, 150); $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetXY($x + 2, $y + $h / 2 - 5); $pdf->Cell($w - 4, 4, pt($motivo), 0, 2, 'C');
+            $pdf->SetFont('Arial', '', 7); $pdf->Cell($w - 4, 4, pt(mb_strimwidth($nome, 0, 40, '...')), 0, 0, 'C');
+            $pdf->SetTextColor(0, 0, 0);
         }
         $pdf->SetY($y + $alt + $espaco);
     }
@@ -506,7 +519,7 @@ if (!empty($levantamento)) {
             $fotos_area = [];
             foreach ((array)($lv['fotos'] ?? []) as $f) {
                 $f = basename((string)$f);
-                if ($f !== '' && file_exists('imagens/' . $f)) $fotos_area[] = 'imagens/' . $f;
+                if ($f !== '') $fotos_area[] = 'imagens/' . $f;
             }
             if ($fotos_area) {
                 $pdf->Ln(2);
@@ -531,7 +544,7 @@ if (!empty($fotos) && is_array($fotos)) {
     $lista_fotos = [];
     foreach ($fotos as $f) {
         $f = basename((string)$f);
-        if ($f !== '' && file_exists('imagens/' . $f)) $lista_fotos[] = 'imagens/' . $f;
+        if ($f !== '') $lista_fotos[] = 'imagens/' . $f;
     }
     desenharFotos($pdf, $lista_fotos, 3, 80);
 }

@@ -10,11 +10,27 @@ if (!isset($_SESSION['user_id'])) {
     exit;
 }
 
-if (file_exists('functions.php')) {
-    require_once 'functions.php';
-} else {
-    function registrarLog($pdo, $acao,$modulo) { return true; }
+require_once 'functions.php';
+
+// NUNCA PERDER DADOS: as fotos retiradas de uma visita não são apagadas; passam para imagens/arquivo/
+function arquivarFotoVisita($nome) {
+    $nome = basename((string)$nome);
+    if ($nome === '' || $nome === '.' || $nome === '..') return;
+    $origem = 'imagens/' . $nome;
+    if (!is_file($origem)) return;
+    if (!is_dir('imagens/arquivo')) @mkdir('imagens/arquivo', 0755, true);
+    if (!@rename($origem, 'imagens/arquivo/' . date('Ymd_His') . '_' . $nome)) error_log('visita_form.php: não foi possível arquivar a foto ' . $nome);
 }
+
+// Motivo de uma fotografia não ter sido recebida pelo servidor
+function erroUploadFoto($codigo, $nome) {
+    $nome = basename((string)$nome);
+    if ($codigo === UPLOAD_ERR_INI_SIZE || $codigo === UPLOAD_ERR_FORM_SIZE) return "\"$nome\" é maior do que o servidor aceita (" . ini_get('upload_max_filesize') . ").";
+    if ($codigo === UPLOAD_ERR_PARTIAL) return "\"$nome\" chegou incompleta (a ligação falhou a meio).";
+    if ($codigo === UPLOAD_ERR_NO_FILE) return '';
+    return "\"$nome\" não foi recebida (erro $codigo).";
+}
+$avisos_fotos = [];
 
 // REGRA DE OURO: Acesso (Visitas Comerciais ou Relatórios de Obra)
 $perfil_user = $_SESSION['perfil'] ?? '';
@@ -225,9 +241,19 @@ if ($grupo === 'obra' && $perfil_user !== 'admin') {
     exit;
 }
 
+// O pedido foi maior do que o servidor aceita (normalmente: demasiadas fotografias grandes de uma vez).
+// O PHP descarta tudo e o $_POST chega vazio.
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+    $mensagem = "Nada foi gravado: as fotografias, todas juntas, excedem o máximo que o servidor aceita (" . ini_get('post_max_size') . "). Grave com menos fotografias de cada vez.";
+    $tipo_mensagem = "erro";
+}
+
 // GRAVAÇÃO (POST)
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST)) {
     try {
+        // REGRA DE OURO 7: token CSRF
+        if (!validar_csrf_token($_POST['csrf_token'] ?? '')) throw new Exception("A sessão expirou ou o pedido não é válido. Atualize a página e grave de novo.");
+
         $pdo->beginTransaction();
 
         $contexto = $_POST['contexto_visita'];$id_cliente = null;
@@ -281,28 +307,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $fotos_atuais = json_decode($visita['fotos'], true) ?: [];
         }
 
+        // Só se retiram fotos que pertencem a esta visita (o nome vem do browser: nunca se usa um caminho)
         $fotos_a_remover = json_decode($_POST['fotos_remover'] ?? '[]', true);
-        if (!empty($fotos_a_remover)) {
-            foreach ($fotos_a_remover as$rm_foto) {
-                $caminho = 'imagens/' .$rm_foto;
-                if (file_exists($caminho)) { unlink($caminho); }$fotos_atuais = array_diff($fotos_atuais, [$rm_foto]);
+        $fotos_retiradas = [];
+        if (is_array($fotos_a_remover) && $fotos_a_remover) {
+            foreach ($fotos_a_remover as $rm_foto) {
+                $rm_foto = basename((string)$rm_foto);
+                if (in_array($rm_foto, $fotos_atuais, true)) $fotos_retiradas[] = $rm_foto;
             }
-            $fotos_atuais = array_values($fotos_atuais);
+            $fotos_atuais = array_values(array_diff($fotos_atuais, $fotos_retiradas));
         }
 
         $novas_fotos = [];
-        if (!empty($_FILES['fotos']['name'][0])) {$upload_dir = 'imagens/';
-            if (!is_dir($upload_dir)) mkdir($upload_dir, 0777, true);
+        if (!empty($_FILES['fotos']['name']) && is_array($_FILES['fotos']['name'])) {
+            $upload_dir = 'imagens/';
+            if (!is_dir($upload_dir)) mkdir($upload_dir, 0755, true);
 
-            foreach ($_FILES['fotos']['name'] as $k =>$name) {
-                if ($_FILES['fotos']['error'][$k] === UPLOAD_ERR_OK) {$tmp = $_FILES['fotos']['tmp_name'][$k];
-                    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
-                    if (in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'])) {
-                        $novo_nome = uniqid('visita_') . '_' . time() . '.' . $ext;
-                        if (move_uploaded_file($tmp, $upload_dir .$novo_nome)) {
-                            $novas_fotos[] =$novo_nome;
-                        }
-                    }
+            foreach ($_FILES['fotos']['name'] as $k => $name) {
+                $erro_up = $_FILES['fotos']['error'][$k] ?? UPLOAD_ERR_NO_FILE;
+                if ($erro_up !== UPLOAD_ERR_OK) {
+                    if ($msg = erroUploadFoto($erro_up, $name)) $avisos_fotos[] = $msg;
+                    continue;
+                }
+                $tmp = $_FILES['fotos']['tmp_name'][$k];
+                $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+                $tipo_real = @getimagesize($tmp);
+                if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp']) || !$tipo_real) {
+                    $avisos_fotos[] = "\"" . basename($name) . "\" não é uma imagem aceite (JPG, PNG ou WEBP).";
+                    continue;
+                }
+                $novo_nome = uniqid('visita_', true) . '.' . $ext;
+                $novo_nome = str_replace('.', '_', pathinfo($novo_nome, PATHINFO_FILENAME)) . '.' . $ext;
+                if (move_uploaded_file($tmp, $upload_dir . $novo_nome)) {
+                    $novas_fotos[] = $novo_nome;
+                } else {
+                    $avisos_fotos[] = "\"" . basename($name) . "\" não pôde ser guardada no servidor.";
                 }
             }
         }
@@ -381,10 +420,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!empty($_FILES['lev_fotos']['name'][$area_k])) {
                     if (!is_dir('imagens/')) mkdir('imagens/', 0777, true);
                     foreach ($_FILES['lev_fotos']['name'][$area_k] as $fi => $fname) {
-                        if (($_FILES['lev_fotos']['error'][$area_k][$fi] ?? 1) !== UPLOAD_ERR_OK) continue;
+                        $erro_up = $_FILES['lev_fotos']['error'][$area_k][$fi] ?? UPLOAD_ERR_NO_FILE;
+                        if ($erro_up !== UPLOAD_ERR_OK) { if ($msg = erroUploadFoto($erro_up, $fname)) $avisos_fotos[] = $msg; continue; }
                         $ext = strtolower(pathinfo($fname, PATHINFO_EXTENSION));
-                        if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'])) continue;
-                        $novo = uniqid('lev_' . $area_k . '_') . '.' . $ext;
+                        if (!in_array($ext, ['jpg', 'jpeg', 'png', 'gif', 'webp'])) { $avisos_fotos[] = "\"" . basename($fname) . "\" não é uma imagem aceite (JPG, PNG ou WEBP)."; continue; }
+                        $novo = str_replace('.', '_', uniqid('lev_' . $area_k . '_', true)) . '.' . $ext;
                         if (move_uploaded_file($_FILES['lev_fotos']['tmp_name'][$area_k][$fi], 'imagens/' . $novo)) $fotos_manter[] = $novo;
                     }
                 }
@@ -399,9 +439,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     json_encode(array_values($fotos_manter))
                 ]);
             }
-            foreach (array_unique($fotos_a_apagar) as $fa) {
-                if ($fa !== '' && strpos($fa, '/') === false && file_exists('imagens/' . $fa)) @unlink('imagens/' . $fa);
-            }
+            foreach (array_unique($fotos_a_apagar) as $fa) arquivarFotoVisita($fa);
         }
 
         // Visita criada a partir de uma chamada recebida: a chamada fica "Convertida" e ligada à visita
@@ -414,7 +452,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         $pdo->commit();
+        // Fotos retiradas: só depois de gravado (se a gravação falhar, continuam onde estavam)
+        foreach ($fotos_retiradas as $fr) arquivarFotoVisita($fr);
         registrarLog($pdo, ($modo_editar ? "Editou" : "Criou") . " Registo #" . $visita_id_atual, "Visitas");
+        if ($avisos_fotos) $_SESSION['avisos_fotos_visita'] = $avisos_fotos;
 
         $redirect =$_POST['redirect_action'] ?? 'voltar';
 
@@ -428,7 +469,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
 
     } catch (Exception $e) {
-        if ($pdo->inTransaction()) $pdo->rollBack();$mensagem = "Erro na gravação: " . $e->getMessage();$tipo_mensagem = "erro";
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        if ($e instanceof PDOException) {
+            error_log('visita_form.php: ' . $e->getMessage());
+            $mensagem = "Não foi possível gravar. Tente de novo; se o erro continuar, avise o administrador.";
+        } else {
+            $mensagem = "Erro na gravação: " . $e->getMessage();
+        }
+        $tipo_mensagem = "erro";
     }
 }
 ?>
@@ -436,7 +484,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <title><?= $titulo_pagina ?> - Gestão MAB</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -641,6 +692,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </header>
 
     <div class="container">
+        <?php $avisos_fotos_ver = $_SESSION['avisos_fotos_visita'] ?? []; unset($_SESSION['avisos_fotos_visita']);
+        if ($avisos_fotos_ver): ?>
+            <div class="alert alert-erro"><i class="fa-solid fa-triangle-exclamation"></i> Algumas fotografias não foram guardadas:<br><?= implode('<br>', array_map(fn($a) => htmlspecialchars($a, ENT_QUOTES, 'UTF-8'), $avisos_fotos_ver)) ?></div>
+        <?php endif; ?>
         <?php if ($mensagem): ?>
             <div class="alert <?= $tipo_mensagem === 'sucesso' ? 'alert-sucesso' : 'alert-erro' ?>"><?= htmlspecialchars($mensagem, ENT_QUOTES, 'UTF-8') ?></div>
         <?php endif; ?>
@@ -654,6 +709,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         <form method="POST" id="formVisita" enctype="multipart/form-data">
             <input type="hidden" name="redirect_action" id="redirect_action" value="voltar">
+            <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
             <input type="hidden" name="fotos_remover" id="fotos_remover" value="[]">
             <?php if (!empty($chamada)): ?>
             <input type="hidden" name="id_contacto" value="<?= (int)$chamada['id'] ?>">
@@ -862,7 +918,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 <div class="foto-upload-area" onclick="document.getElementById('input_fotos').click()">
                     <i class="fa-solid fa-cloud-arrow-up"></i>
                     <span style="font-weight:600; color:#2c3e50;">Clique para anexar fotografias ou esquemas</span>
-                    <div style="font-size:11px; color:#7f8c8d; margin-top:5px;">Formatos aceites: JPG, PNG, WEBP</div>
+                    <div style="font-size:11px; color:#7f8c8d; margin-top:5px;">Formatos aceites: JPG, PNG, WEBP · pode juntar fotografias várias vezes antes de gravar</div>
                 </div>
                 <input type="file" name="fotos[]" id="input_fotos" multiple accept="image/*" style="display:none;" onchange="previewNovasFotos(this)">
 
@@ -871,11 +927,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $fotos_salvas = isset($visita['fotos']) ? json_decode($visita['fotos'], true) : [];
                         if(!empty($fotos_salvas) && is_array($fotos_salvas)):
                             foreach($fotos_salvas as $f):
-                                $path = 'imagens/' . $f;
+                                $f = basename((string)$f);
+                                $path = 'imagens/' . rawurlencode($f);
                     ?>
                         <div class="foto-item" id="foto_<?= md5($f) ?>">
-                            <img src="<?= $path ?>" alt="Anexo" onclick="window.open('<?= $path ?>', '_blank')" style="cursor:zoom-in;">
-                            <button type="button" class="btn-rm-foto" onclick="marcarFotoRemocao('<?= $f ?>', 'foto_<?= md5($f) ?>')"><i class="fa-solid fa-xmark"></i></button>
+                            <img src="<?= htmlspecialchars($path) ?>" alt="Anexo" onclick="window.open(this.src, '_blank')" style="cursor:zoom-in;">
+                            <button type="button" class="btn-rm-foto" data-foto="<?= htmlspecialchars($f) ?>" onclick="marcarFotoRemocao(this.dataset.foto, 'foto_<?= md5($f) ?>')"><i class="fa-solid fa-xmark"></i></button>
                         </div>
                     <?php
                             endforeach;
@@ -1329,14 +1386,74 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             else { document.querySelectorAll('input[name="' + radio.name + '"]').forEach(r => r.dataset.era = ''); radio.dataset.era = '1'; }
         }
         document.querySelectorAll('.lev-seg input:checked').forEach(r => r.dataset.era = '1');
-        function levPreview(input) {
-            const cont = input.closest('.lev-campo').querySelector('.lev-fotos');
-            cont.querySelectorAll('.lev-foto.nova').forEach(el => el.remove());
-            Array.from(input.files || []).forEach(f => {
-                const r = new FileReader();
-                r.onload = e => { const d = document.createElement('div'); d.className = 'lev-foto nova'; d.innerHTML = '<img src="' + e.target.result + '" style="opacity:0.7;">'; cont.appendChild(d); };
-                r.readAsDataURL(f);
+        // ---------- FOTOGRAFIAS NOVAS ----------
+        // Cada escolha de fotografias JUNTA-SE às anteriores (antes, a 2.ª escolha substituía a 1.ª e só ia uma).
+        // As fotografias grandes do telemóvel são reduzidas no browser (máx. 1920 px, já endireitadas) antes de
+        // serem enviadas: o envio é mais rápido e não passa o limite de tamanho do servidor.
+        const FOTO_MAX_PX = 1920, FOTO_QUALIDADE = 0.85;
+        let fotosEmPreparacao = 0;
+        function estadoPreparacao(delta) {
+            fotosEmPreparacao += delta;
+            document.querySelectorAll('.btn-save').forEach(b => {
+                if (!b.dataset.txt) b.dataset.txt = b.innerHTML;
+                b.disabled = fotosEmPreparacao > 0;
+                b.innerHTML = fotosEmPreparacao > 0 ? '<i class="fa-solid fa-spinner fa-spin"></i> A PREPARAR FOTOGRAFIAS...' : b.dataset.txt;
             });
+        }
+        async function reduzirFoto(file) {
+            if (!/^image\/(jpeg|png|webp)$/i.test(file.type) || typeof createImageBitmap !== 'function') return file;
+            try {
+                const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+                const f = Math.min(1, FOTO_MAX_PX / Math.max(bmp.width, bmp.height));
+                if (f === 1 && file.size < 1.5 * 1024 * 1024) { bmp.close && bmp.close(); return file; }
+                const c = document.createElement('canvas');
+                c.width = Math.round(bmp.width * f); c.height = Math.round(bmp.height * f);
+                const ctx = c.getContext('2d');
+                ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+                ctx.drawImage(bmp, 0, 0, c.width, c.height);
+                bmp.close && bmp.close();
+                const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', FOTO_QUALIDADE));
+                if (!blob || blob.size >= file.size) return file;
+                return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg', lastModified: Date.now() });
+            } catch (e) { return file; }
+        }
+        // Junta os ficheiros escolhidos agora aos já escolhidos neste campo e mostra-os com um "x" para retirar
+        async function juntarFotos(input, galeria, classe) {
+            if (!input._fotos) input._fotos = [];
+            const escolhidas = Array.from(input.files || []).filter(f => f.type.startsWith('image/'));
+            estadoPreparacao(1);
+            try {
+                for (const f of escolhidas) input._fotos.push(await reduzirFoto(f));
+            } finally {
+                estadoPreparacao(-1);
+            }
+            atualizarFotosInput(input, galeria, classe);
+        }
+        function atualizarFotosInput(input, galeria, classe) {
+            if (typeof DataTransfer === 'function') {
+                const dt = new DataTransfer();
+                input._fotos.forEach(f => dt.items.add(f));
+                input.files = dt.files;
+            }
+            galeria.querySelectorAll('.' + classe).forEach(el => el.remove());
+            input._fotos.forEach((f, i) => {
+                const url = URL.createObjectURL(f);
+                const div = document.createElement('div');
+                div.className = (classe === 'lev-foto-nova' ? 'lev-foto nova ' : 'foto-item foto-preview-nova ') + classe;
+                div.style.position = 'relative';
+                div.innerHTML = '<img src="' + url + '" style="opacity:0.75;">'
+                    + '<div style="position:absolute; bottom:0; left:0; background:rgba(0,0,0,0.5); width:100%; color:#fff; font-size:10px; text-align:center; padding:2px;">Por guardar</div>'
+                    + '<button type="button" class="btn-rm-foto" title="Retirar" style="position:absolute; top:4px; right:4px;"><i class="fa-solid fa-xmark"></i></button>';
+                div.querySelector('button').addEventListener('click', ev => {
+                    ev.stopPropagation();
+                    input._fotos.splice(i, 1);
+                    atualizarFotosInput(input, galeria, classe);
+                });
+                galeria.appendChild(div);
+            });
+        }
+        function levPreview(input) {
+            juntarFotos(input, input.closest('.lev-campo').querySelector('.lev-fotos'), 'lev-foto-nova');
         }
 
         // --- FOTOGRAFIAS ---
@@ -1350,29 +1467,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         function previewNovasFotos(input) {
-            const galeria = document.getElementById('galeria_fotos');
-            document.querySelectorAll('.foto-preview-nova').forEach(el => el.remove());
-
-            if (input.files && input.files.length > 0) {
-                Array.from(input.files).forEach(file => {
-                    if (file.type.startsWith('image/')) {
-                        const reader = new FileReader();
-                        reader.onload = function(e) {
-                            const div = document.createElement('div');
-                            div.className = 'foto-item foto-preview-nova';
-                            div.innerHTML = `<img src="${e.target.result}" style="opacity:0.7;">
-                                             <div style="position:absolute; bottom:0; background:rgba(0,0,0,0.5); width:100%; color:#fff; font-size:10px; text-align:center; padding:2px;">Por Guardar</div>`;
-                            galeria.appendChild(div);
-                        }
-                        reader.readAsDataURL(file);
-                    }
-                });
-            }
+            juntarFotos(input, document.getElementById('galeria_fotos'), 'foto-nova');
         }
 
         let isRedirectChosen = false;
         const form = document.getElementById('formVisita');
         form.addEventListener('submit', function(e) {
+            if (fotosEmPreparacao > 0) { e.preventDefault(); alert('Aguarde: as fotografias ainda estão a ser preparadas.'); return; }
             const falta = levCamposEmFalta();
             if (falta) {
                 e.preventDefault();
