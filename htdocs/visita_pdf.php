@@ -1,8 +1,9 @@
 <?php
-// REGRA DE OURO: Limpar qualquer espaço em branco ou lixo antes de gerar o PDF
+// REGRA DE OURO 4: Limpar qualquer espaço em branco ou lixo antes de gerar o PDF
 ob_start();
 session_start();
 
+// REGRA DE OURO 1: Validação de sessão
 if (!isset($_SESSION['user_id'])) {
     ob_end_clean();
     die("Acesso negado.");
@@ -12,6 +13,17 @@ require_once 'db.php';
 require_once('fpdf/fpdf.php');
 require_once 'levantamento_def.php';
 
+// REGRA DE OURO 2: Acesso restrito pela matriz de permissões (as mesmas da ficha da visita)
+$perfil_user = $_SESSION['perfil'] ?? '';
+$stmt_perm = $pdo->prepare("SELECT modulo FROM permissoes WHERE grupo = :perfil AND pode_aceder = 1");
+$stmt_perm->execute(['perfil' => $perfil_user]);
+$meus_acessos = $stmt_perm->fetchAll(PDO::FETCH_COLUMN);
+if (!in_array($perfil_user, ['admin', 'administrativo']) && !in_array('visitas', $meus_acessos) && !in_array('relatorios', $meus_acessos)) {
+    ob_end_clean();
+    die("Acesso negado.");
+}
+
+// REGRA DE OURO 5: ID validado como número inteiro
 $id = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 if (!$id) {
     ob_end_clean();
@@ -42,8 +54,9 @@ try {
         die("Erro: Registo não encontrado.");
     }
 } catch (Exception $e) {
+    error_log('visita_pdf.php: ' . $e->getMessage());
     ob_end_clean();
-    die("Erro na BD: " . htmlspecialchars($e->getMessage()));
+    die("Não foi possível gerar o documento. Avise o administrador.");
 }
 
 // Acompanhamentos e reuniões de obra: só para utilizadores do tipo admin
@@ -94,6 +107,102 @@ function otimizarImagem($ficheiro) {
         return $nome_otimizado;
     }
     return $ficheiro;
+}
+
+// ---------- FOTOS ----------
+// Orientação gravada pela câmara do telemóvel (EXIF). Sem isto, as fotos tiradas ao alto saem deitadas no PDF.
+function orientacaoExif($ficheiro) {
+    if (function_exists('exif_read_data')) {
+        $exif = @exif_read_data($ficheiro);
+        return (int)($exif['Orientation'] ?? 1);
+    }
+    // Sem a extensão exif: lê a etiqueta diretamente do ficheiro JPEG
+    $fh = @fopen($ficheiro, 'rb'); if (!$fh) return 1;
+    $dados = fread($fh, 131072); fclose($fh);
+    $pos = strpos($dados, "Exif\0\0"); if ($pos === false) return 1;
+    $tiff = substr($dados, $pos + 6);
+    if (strlen($tiff) < 8) return 1;
+    $le = substr($tiff, 0, 2) === 'II';
+    $u16 = fn($o) => $o + 2 <= strlen($tiff) ? unpack($le ? 'v' : 'n', substr($tiff, $o, 2))[1] : 0;
+    $u32 = fn($o) => $o + 4 <= strlen($tiff) ? unpack($le ? 'V' : 'N', substr($tiff, $o, 4))[1] : 0;
+    $ifd = $u32(4); $n = $u16($ifd);
+    for ($i = 0; $i < $n && $i < 200; $i++) {
+        $ent = $ifd + 2 + $i * 12;
+        if ($u16($ent) === 0x0112) return (int)$u16($ent + 8);
+    }
+    return 1;
+}
+
+// Prepara a foto para o PDF: endireita-a (EXIF), reduz para no máximo 1400 px e converte WEBP/GIF em JPEG.
+// A cópia fica em imagens/pdf_cache/ (é criada só uma vez). Devolve [ficheiro, largura px, altura px] ou null.
+function fotoParaPdf($ficheiro) {
+    $info = @getimagesize($ficheiro);
+    if (!$info || $info[0] < 1 || $info[1] < 1) return null;
+    [$w, $h, $tipo] = $info;
+    $orient = ($tipo == IMAGETYPE_JPEG) ? orientacaoExif($ficheiro) : 1;
+    $roda = in_array($orient, [3, 6, 8]);
+    $max = 1400;
+    $precisa = $roda || max($w, $h) > $max || !in_array($tipo, [IMAGETYPE_JPEG, IMAGETYPE_PNG]);
+    if (!$precisa || !function_exists('imagecreatetruecolor')) {
+        return in_array($tipo, [IMAGETYPE_JPEG, IMAGETYPE_PNG]) ? [$ficheiro, $w, $h] : null;
+    }
+
+    $pasta = 'imagens/pdf_cache/';
+    $cache = $pasta . md5($ficheiro . '|' . @filemtime($ficheiro) . '|v2') . '.jpg';
+    if (file_exists($cache) && ($ci = @getimagesize($cache))) return [$cache, $ci[0], $ci[1]];
+
+    $origem = null;
+    if ($tipo == IMAGETYPE_JPEG) $origem = @imagecreatefromjpeg($ficheiro);
+    elseif ($tipo == IMAGETYPE_PNG) $origem = @imagecreatefrompng($ficheiro);
+    elseif ($tipo == IMAGETYPE_GIF) $origem = @imagecreatefromgif($ficheiro);
+    elseif (defined('IMAGETYPE_WEBP') && $tipo == IMAGETYPE_WEBP && function_exists('imagecreatefromwebp')) $origem = @imagecreatefromwebp($ficheiro);
+    if (!$origem) return in_array($tipo, [IMAGETYPE_JPEG, IMAGETYPE_PNG]) ? [$ficheiro, $w, $h] : null;
+
+    // Reduz primeiro (gasta menos memória a rodar)
+    $f = min(1, $max / max($w, $h));
+    $nw = max(1, (int)round($w * $f)); $nh = max(1, (int)round($h * $f));
+    $img = imagecreatetruecolor($nw, $nh);
+    imagefill($img, 0, 0, imagecolorallocate($img, 255, 255, 255));   // fundo branco (PNG/GIF transparentes)
+    imagecopyresampled($img, $origem, 0, 0, 0, 0, $nw, $nh, $w, $h);
+    imagedestroy($origem);
+    if ($orient == 3) $img = imagerotate($img, 180, 0);
+    elseif ($orient == 6) $img = imagerotate($img, -90, 0);
+    elseif ($orient == 8) $img = imagerotate($img, 90, 0);
+
+    if (!is_dir($pasta)) @mkdir($pasta, 0755, true);
+    $ok = @imagejpeg($img, $cache, 82);
+    $fw = imagesx($img); $fh = imagesy($img);
+    imagedestroy($img);
+    if ($ok) return [$cache, $fw, $fh];
+    return in_array($tipo, [IMAGETYPE_JPEG, IMAGETYPE_PNG]) && !$roda ? [$ficheiro, $w, $h] : null;
+}
+
+// Desenha as fotos em grelha ($por_linha por linha), cada uma dentro de uma célula de largura fixa e altura
+// máxima $h_max, sem deformar e centrada. Cada linha começa abaixo da foto mais alta da linha anterior e, no fim,
+// o cursor fica por baixo da última linha (para o que vem a seguir não ficar por cima das fotos).
+function desenharFotos($pdf, $ficheiros, $por_linha, $h_max) {
+    $x0 = 10; $largura_util = 190; $espaco = 4; $limite = 272;
+    $w_cel = ($largura_util - ($por_linha - 1) * $espaco) / $por_linha;
+    $fotos = [];
+    foreach ($ficheiros as $f) {
+        $p = fotoParaPdf($f);
+        if (!$p) continue;
+        [$fich, $pw, $ph] = $p;
+        $w = $w_cel; $h = $w * $ph / $pw;
+        if ($h > $h_max) { $h = $h_max; $w = $h * $pw / $ph; }
+        $fotos[] = [$fich, $w, $h];
+    }
+    if (!$fotos) return;
+    foreach (array_chunk($fotos, $por_linha) as $linha) {
+        $alt = max(array_column($linha, 2));
+        $y = $pdf->GetY();
+        if ($y + $alt > $limite) { $pdf->AddPage(); $y = $pdf->GetY(); }
+        foreach ($linha as $i => [$fich, $w, $h]) {
+            $x = $x0 + $i * ($w_cel + $espaco) + ($w_cel - $w) / 2;
+            try { $pdf->Image($fich, $x, $y, $w, $h); } catch (Exception $e) { error_log('visita_pdf.php (foto ' . $fich . '): ' . $e->getMessage()); }
+        }
+        $pdf->SetY($y + $alt + $espaco);
+    }
 }
 
 // --- CLASSE PDF CUSTOMIZADA ---
@@ -394,22 +503,14 @@ if (!empty($levantamento)) {
                 $pdf->SetFont('Arial', '', 9); $pdf->MultiCell(0, 5, pt($lv['notas']), 0, 'J');
             }
             // Fotos da área (4 por linha)
-            $fotos_area = array_values(array_filter($lv['fotos'] ?? [], fn($f) => file_exists('imagens/' . $f)));
+            $fotos_area = [];
+            foreach ((array)($lv['fotos'] ?? []) as $f) {
+                $f = basename((string)$f);
+                if ($f !== '' && file_exists('imagens/' . $f)) $fotos_area[] = 'imagens/' . $f;
+            }
             if ($fotos_area) {
                 $pdf->Ln(2);
-                $x = 10; $y = $pdf->GetY(); $w_img = 44; $alt_linha = 0;
-                foreach ($fotos_area as $f) {
-                    $info = @getimagesize('imagens/' . $f);
-                    if (!$info) continue;
-                    $h_img = $w_img * $info[1] / max(1, $info[0]);
-                    if ($h_img > 60) $h_img = 60;
-                    if ($y + $h_img > 270) { $pdf->AddPage(); $y = $pdf->GetY(); $x = 10; $alt_linha = 0; }
-                    $pdf->Image('imagens/' . $f, $x, $y, 0, $h_img);
-                    $alt_linha = max($alt_linha, $h_img);
-                    $x += $w_img + 4;
-                    if ($x + $w_img > 200) { $x = 10; $y += $alt_linha + 4; $alt_linha = 0; }
-                }
-                $pdf->SetY($y + $alt_linha + 2);
+                desenharFotos($pdf, $fotos_area, 4, 60);
             }
         }
     }
@@ -426,54 +527,19 @@ if (!empty($fotos) && is_array($fotos)) {
     $pdf->DrawBoxTitle('REGISTO FOTOGRÁFICO / ANEXOS');
     $pdf->Ln(4);
 
-    $x_start = 10;
-    $x = $x_start;
-    $y = $pdf->GetY();
-    $w_img = 60; // Largura da imagem (cabe 3 por linha: 60*3 = 180mm)
-    $margin_right = 5;
-    $row_max_h = 0;
-
+    // 3 fotos por linha, até 80 mm de altura cada (as fotos ao alto ficam mais estreitas, centradas)
+    $lista_fotos = [];
     foreach ($fotos as $f) {
-        $path = 'imagens/' . $f;
-        if (file_exists($path)) {
-            // Obter dimensões originais para calcular a altura redimensionada
-            $info = @getimagesize($path);
-            if ($info) {
-                $largura_orig = $info[0];
-                $altura_orig = $info[1];
-                $h_img = floor(($altura_orig / $largura_orig) * $w_img); // Mantém a proporção
-
-                // Se a imagem for passar o limite da página, salta!
-                if ($y + $h_img > 270) {
-                    $pdf->AddPage();
-                    $y = $pdf->GetY();
-                    $x = $x_start;
-                    $row_max_h = 0;
-                }
-
-                // Inserir Imagem
-                $pdf->Image($path, $x, $y, $w_img, 0); // O 0 na altura força o FPDF a calcular automaticamente a proporção correta
-
-                // Regista a imagem mais alta da linha atual
-                if ($h_img > $row_max_h) { $row_max_h = $h_img; }
-
-                $x += $w_img + $margin_right;
-
-                // Quebra de linha se chegarmos ao fim da página (3 fotos)
-                if ($x + $w_img > 200) {
-                    $x = $x_start;
-                    $y += $row_max_h + 5; // Avança para a linha de baixo baseada na foto mais alta
-                    $row_max_h = 0;
-                }
-            }
-        }
+        $f = basename((string)$f);
+        if ($f !== '' && file_exists('imagens/' . $f)) $lista_fotos[] = 'imagens/' . $f;
     }
+    desenharFotos($pdf, $lista_fotos, 3, 80);
 }
 
 // --- ASSINATURAS FINAIS ---
-$pdf->Ln(20);
-// Prevenção de quebra a meio das assinaturas
-if ($pdf->GetY() > 240) { $pdf->AddPage(); $pdf->Ln(10); }
+$pdf->Ln(15);
+// Prevenção de quebra a meio das assinaturas (precisam de ~30 mm)
+if ($pdf->GetY() > 245) { $pdf->AddPage(); $pdf->Ln(10); }
 
 $y_assinaturas = $pdf->GetY();
 
