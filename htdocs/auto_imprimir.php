@@ -26,6 +26,7 @@ if (!function_exists('totalFoiAcertado')) {
 // Quando o auto tem trabalhos adjudicados E suplementares, saem 2 documentos separados:
 //   auto_imprimir.php?id=12&parte=adj → Auto de Medição — Trabalhos Adjudicados
 //   auto_imprimir.php?id=12&parte=sup → Auto de Medição — Trabalhos Suplementares
+//   auto_imprimir.php?id=12&parte=todos → um só documento com as duas tabelas e o resumo (como era antes)
 //   auto_imprimir.php?id=12           → mostra os dois (um em cada folha), com um botão para imprimir cada um
 // Se só houver um dos tipos, sai só esse documento (como antes).
 // =====================================================================
@@ -93,6 +94,7 @@ $parte = $_GET['parte'] ?? '';
 $docs = [];
 if ($parte === 'adj' && $itens_adj) $docs = ['adj'];
 elseif ($parte === 'sup' && $itens_sup) $docs = ['sup'];
+elseif ($parte === 'todos') $docs = ['todos'];
 else {
     if ($itens_adj) $docs[] = 'adj';
     if ($itens_sup) $docs[] = 'sup';
@@ -104,7 +106,7 @@ $TITULOS = ['adj' => 'Trabalhos Adjudicados', 'sup' => 'Trabalhos Suplementares'
 
 // Título da página = nome do PDF ao "Guardar como PDF"
 $nome_doc = 'Auto ' . $auto['numero_auto'] . ' (v' . $versao_auto . ')'
-          . (count($docs) === 1 && $dois_tipos ? ' - ' . $TITULOS[$docs[0]] : '')
+          . (count($docs) === 1 && $dois_tipos && isset($TITULOS[$docs[0]]) ? ' - ' . $TITULOS[$docs[0]] : '')
           . ' - ' . $auto['obra_nome'];
 
 $fmt = fn($v, $d = 2) => number_format((float)$v, $d, ',', '.');
@@ -347,17 +349,21 @@ function linhasAuto($lista, $suplementar, $fmt) {
         <?php if ($dois_tipos): ?>
             <a href="auto_imprimir.php?id=<?= (int)$id_auto ?>&amp;parte=adj" class="btn<?= $docs === ['adj'] ? '' : ' btn-out' ?>"><i class="fa-solid fa-print"></i> Imprimir Auto Adjudicado</a>
             <a href="auto_imprimir.php?id=<?= (int)$id_auto ?>&amp;parte=sup" class="btn<?= $docs === ['sup'] ? '' : ' btn-out' ?>"><i class="fa-solid fa-print"></i> Imprimir Auto Suplementar</a>
+            <a href="auto_imprimir.php?id=<?= (int)$id_auto ?>&amp;parte=todos" class="btn<?= $docs === ['todos'] ? '' : ' btn-out' ?>"><i class="fa-solid fa-print"></i> Imprimir Auto Completo</a>
             <?php if (!$ver_os_dois): ?><a href="auto_imprimir.php?id=<?= (int)$id_auto ?>" class="btn btn-secundary"><i class="fa-solid fa-copy"></i> Ver os dois</a><?php endif; ?>
         <?php endif; ?>
         <?php if (!$ver_os_dois): ?><button onclick="window.print()" class="btn"><i class="fa-solid fa-file-pdf"></i> Imprimir / Guardar PDF</button><?php endif; ?>
     </div>
     <?php if ($ver_os_dois): ?>
-        <div class="aviso-dois no-print"><i class="fa-solid fa-circle-info"></i> Este auto tem trabalhos adjudicados e suplementares: saem em dois documentos separados. Use os botões acima para imprimir ou guardar cada um.</div>
+        <div class="aviso-dois no-print"><i class="fa-solid fa-circle-info"></i> Este auto tem trabalhos adjudicados e suplementares. Imprima cada um em separado, ou o <strong>Auto Completo</strong> (as duas tabelas num só documento, como antes).</div>
     <?php endif; ?>
 
     <?php foreach ($docs as $doc_tipo):
+        // Secções (tabelas) deste documento: "todos" = adjudicados + suplementares no mesmo documento
+        $secoes = ($doc_tipo === 'todos') ? array_values(array_filter(['adj' => $itens_adj ? 'adj' : null, 'sup' => $itens_sup ? 'sup' : null])) : [$doc_tipo];
+        $completo = ($doc_tipo === 'todos' || !$dois_tipos);
         $sup = ($doc_tipo === 'sup');
-        $lista = $sup ? $itens_sup : $itens_adj;
+        $tots = ['adj' => ['mes' => 0], 'sup' => ['mes' => 0]];
     ?>
     <div class="print-container">
         
@@ -372,7 +378,7 @@ function linhasAuto($lista, $suplementar, $fmt) {
                             <div class="doc-title">
                                 <h1>Auto de Medição</h1>
                                 <p>Nº <?= htmlspecialchars($auto['numero_auto']) ?> (v<?= $versao_auto ?>)<?= !empty($auto['mes_referencia']) ? ' - ' . htmlspecialchars($auto['mes_referencia']) : '' ?></p>
-                                <?php if ($dois_tipos): ?><span class="doc-tipo<?= $sup ? ' sup' : '' ?>"><?= $TITULOS[$doc_tipo] ?></span><?php endif; ?>
+                                <?php if ($dois_tipos && !$completo): ?><span class="doc-tipo<?= $sup ? ' sup' : '' ?>"><?= $TITULOS[$doc_tipo] ?></span><?php endif; ?>
                             </div>
                         </div>
 
@@ -400,8 +406,11 @@ function linhasAuto($lista, $suplementar, $fmt) {
             <tbody>
                 <tr>
                     <td>
-                        <?php if ($lista): ?>
-                        <div class="section-title"><?= $TITULOS[$doc_tipo] ?></div>
+                        <?php foreach ($secoes as $n_sec => $sec):
+                            $sup = ($sec === 'sup');
+                            $lista = $sup ? $itens_sup : $itens_adj;
+                            if (!$lista) continue; ?>
+                        <div class="section-title"<?= $n_sec > 0 ? ' style="margin-top:20px;"' : '' ?>><?= $TITULOS[$sec] ?></div>
                         <table class="data-table">
                             <thead>
                                 <tr>
@@ -427,7 +436,7 @@ function linhasAuto($lista, $suplementar, $fmt) {
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php $tot = linhasAuto($lista, $sup, $fmt); ?>
+                                <?php $tot = linhasAuto($lista, $sup, $fmt); $tots[$sec] = $tot; ?>
                             </tbody>
                             <tfoot>
                                 <tr class="row-totais">
@@ -443,20 +452,26 @@ function linhasAuto($lista, $suplementar, $fmt) {
                                 </tr>
                             </tfoot>
                         </table>
-                        <?php else: $tot = ['mes' => 0]; endif; ?>
+                        <?php endforeach; ?>
 
                         <div class="clearfix">
                             <table class="resumo">
-                                <?php if ($dois_tipos): ?>
+                                <?php if (!$completo): ?>
                                 <tr class="total-final">
                                     <th>TOTAL DO AUTO (<?= $sup ? 'SUPLEMENTARES' : 'ADJUDICADOS' ?>)</th>
-                                    <td><?= $fmt($tot['mes']) ?> €</td>
+                                    <td><?= $fmt($tots[$doc_tipo]['mes']) ?> €</td>
                                 </tr>
                                 <?php else: ?>
                                 <tr>
-                                    <th><?= $sup ? 'Total Suplementar (Auto)' : 'Total Adjudicado (Auto)' ?></th>
-                                    <td><?= $fmt($tot['mes']) ?> €</td>
+                                    <th>Total Adjudicado (Auto)</th>
+                                    <td><?= $fmt($tots['adj']['mes']) ?> €</td>
                                 </tr>
+                                <?php if ($itens_sup): ?>
+                                <tr>
+                                    <th>Total Suplementar (Auto)</th>
+                                    <td><?= $fmt($tots['sup']['mes']) ?> €</td>
+                                </tr>
+                                <?php endif; ?>
                                 <tr class="total-final">
                                     <th>TOTAL DO AUTO</th>
                                     <td><?= $fmt($auto['valor_total_mes']) ?> €</td>
