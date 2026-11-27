@@ -78,6 +78,93 @@ $valor_hora_homem_str = $stmt_hora->fetchColumn();
 $valor_hora_homem = $valor_hora_homem_str ? limparNumero($valor_hora_homem_str) : 0;
 
 // =========================================================================
+// ARTIGOS COMPOSTOS: um artigo feito de vários artigos da tabela (ex.: ponto de luz completo).
+// composicao_json = [{"id": 12, "q": 1.5}, …] (quantidade de cada artigo para 1 unidade do composto).
+// O preço é SEMPRE automático: custo, tempo e preço de venda = soma dos componentes × quantidade.
+// Recalcula-se sempre que um componente é gravado e depois da margem global.
+// Um composto não entra noutro composto; um artigo que faz parte de um composto não se apaga.
+// =========================================================================
+function tpMigrarCompostos($pdo) {
+    try {
+        if (!$pdo->query("SHOW COLUMNS FROM tabela_precos LIKE 'composicao_json'")->fetch())
+            $pdo->exec("ALTER TABLE tabela_precos ADD COLUMN composicao_json TEXT NULL");
+        return true;
+    } catch (Exception $e) { error_log('tabela_precos (compostos): ' . $e->getMessage()); return false; }
+}
+$tem_compostos = tpMigrarCompostos($pdo);
+
+function tpLerComposicao($json) {
+    $a = json_decode((string)$json, true);
+    return is_array($a) ? $a : [];
+}
+// Limpa a lista e calcula os totais a partir dos componentes atuais. Lança exceção se algo não for válido.
+function tpCalcularComposto($pdo, array $comp, $id_proprio, $valor_hora) {
+    $limpa = [];
+    foreach ($comp as $c) {
+        $id = (int)($c['id'] ?? 0);
+        $q = is_numeric($c['q'] ?? null) ? (float)$c['q'] : limparNumero($c['q'] ?? 0);
+        if ($id <= 0 || $q <= 0) continue;
+        if ($id_proprio && $id === (int)$id_proprio) throw new Exception('Um artigo não pode fazer parte de si próprio.');
+        $limpa[] = ['id' => $id, 'q' => round($q, 4)];
+    }
+    if (!$limpa) return null;
+    $ids = array_values(array_unique(array_column($limpa, 'id')));
+    $st = $pdo->prepare("SELECT * FROM tabela_precos WHERE id IN (" . implode(',', array_fill(0, count($ids), '?')) . ")");
+    $st->execute($ids);
+    $arts = [];
+    foreach ($st->fetchAll(PDO::FETCH_ASSOC) as $a) $arts[(int)$a['id']] = $a;
+    $pc = 0; $t = 0; $pmat = 0; $pv = 0;
+    foreach ($limpa as $c) {
+        $a = $arts[$c['id']] ?? null;
+        if (!$a) throw new Exception('Um dos artigos da composição já não existe na tabela de preços.');
+        if (tpLerComposicao($a['composicao_json'] ?? '')) throw new Exception('O artigo ' . $a['referencia'] . ' também é composto: um composto não pode entrar noutro.');
+        $pc_i = (float)$a['preco_custo'];
+        $pc   += $c['q'] * $pc_i;
+        $pmat += $c['q'] * ($pc_i * (1 + ((float)$a['percentagem_lucro']) / 100));
+        $t    += $c['q'] * (float)$a['tempo_mao_obra'] * max(1, (int)$a['n_colaboradores']);
+        $pv   += $c['q'] * (float)$a['preco_com_mo'];
+    }
+    return [
+        'composicao' => $limpa,
+        'preco_custo' => round($pc, 3),
+        'tempo_mao_obra' => round($t, 2),
+        'n_colaboradores' => 1,
+        'percentagem_lucro' => $pc > 0 ? (int)round(($pmat / $pc - 1) * 100) : 0,
+        'preco_material' => round($pmat, 3),
+        'valor_mo' => round(($t / 60) * $valor_hora, 3),
+        'preco_com_mo' => round($pv, 2),
+    ];
+}
+// Recalcula os compostos (todos, ou só os que usam o artigo $id_componente). Devolve os compostos alterados.
+function tpRecalcularCompostos($pdo, $valor_hora, $id_componente = null) {
+    $alterados = [];
+    $todos = $pdo->query("SELECT * FROM tabela_precos WHERE composicao_json IS NOT NULL AND composicao_json <> '' AND composicao_json <> '[]'")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($todos as $a) {
+        $comp = tpLerComposicao($a['composicao_json']);
+        if (!$comp) continue;
+        if ($id_componente && !in_array((int)$id_componente, array_map('intval', array_column($comp, 'id')), true)) continue;
+        try { $r = tpCalcularComposto($pdo, $comp, $a['id'], $valor_hora); } catch (Exception $e) { continue; }
+        if (!$r) continue;
+        if (abs($r['preco_custo'] - (float)$a['preco_custo']) < 0.0005 && abs($r['preco_com_mo'] - (float)$a['preco_com_mo']) < 0.005
+            && abs($r['tempo_mao_obra'] - (float)$a['tempo_mao_obra']) < 0.005) continue;
+        tpCriarArquivo($pdo);
+        tpArquivar($pdo, [$a], 'recalculado');
+        $pdo->prepare("UPDATE tabela_precos SET preco_custo = ?, percentagem_lucro = ?, margem_bloqueada = 1, preco_material = ?, valor_mo = ?, preco_com_mo = ?, tempo_mao_obra = ?, n_colaboradores = 1, data_alteracao = ? WHERE id = ?")
+            ->execute([$r['preco_custo'], $r['percentagem_lucro'], $r['preco_material'], $r['valor_mo'], $r['preco_com_mo'], $r['tempo_mao_obra'], date('Y-m-d H:i:s'), $a['id']]);
+        $st = $pdo->prepare("SELECT * FROM tabela_precos WHERE id = ?"); $st->execute([$a['id']]);
+        $alterados[] = $st->fetch(PDO::FETCH_ASSOC);
+    }
+    return $alterados;
+}
+// Compostos que usam um artigo (para não o deixar apagar)
+function tpCompostosQueUsam($pdo, $id) {
+    $r = [];
+    foreach ($pdo->query("SELECT id, referencia, composicao_json FROM tabela_precos WHERE composicao_json IS NOT NULL AND composicao_json <> ''")->fetchAll(PDO::FETCH_ASSOC) as $a)
+        if (in_array((int)$id, array_map('intval', array_column(tpLerComposicao($a['composicao_json']), 'id')), true)) $r[] = $a['referencia'];
+    return $r;
+}
+
+// =========================================================================
 // ENDPOINT AJAX: GRAVAR / EDITAR ARTIGO SEM RECARREGAR A PÁGINA
 // =========================================================================
 if (isset($_GET['ajax_save_artigo'])) {
@@ -110,6 +197,25 @@ if (isset($_GET['ajax_save_artigo'])) {
         $preco_material = $preco_custo + ($preco_custo * ($percentagem_lucro / 100));
         $valor_mo = ($tempo_mao_obra / 60) * $n_colaboradores * $valor_hora_homem;
         $preco_com_mo = round($preco_material + $valor_mo, 2);
+
+        // Artigo composto: os valores vêm sempre da soma dos componentes (o que vier do formulário é ignorado)
+        $composto = null;
+        if ($tem_compostos && trim((string)($_POST['composicao_json'] ?? '')) !== '') {
+            $composto = tpCalcularComposto($pdo, tpLerComposicao($_POST['composicao_json']), $id_artigo, $valor_hora_homem);
+            if ($composto) {
+                // Um artigo que já faz parte de outro composto não pode passar a ser composto
+                if ($id_artigo && ($usado = tpCompostosQueUsam($pdo, $id_artigo)))
+                    throw new Exception('Este artigo faz parte do composto ' . implode(', ', $usado) . ': não pode ser também composto.');
+                $preco_custo = $composto['preco_custo'];
+                $percentagem_lucro = $composto['percentagem_lucro'];
+                $tempo_mao_obra = $composto['tempo_mao_obra'];
+                $n_colaboradores = 1;
+                $margem_bloqueada = 1;   // a margem global não mexe nos compostos
+                $preco_material = $composto['preco_material'];
+                $valor_mo = $composto['valor_mo'];
+                $preco_com_mo = $composto['preco_com_mo'];
+            }
+        }
 
         $is_new = false;
         $data_alteracao = date('Y-m-d H:i:s'); // Por defeito (se for novo ou se os preços mudarem)
@@ -148,12 +254,20 @@ if (isset($_GET['ajax_save_artigo'])) {
             if ($tem_fichas) $pdo->prepare("UPDATE tabela_precos SET marca = ?, id_ficha_tecnica = ? WHERE id = ?")->execute([$marca, $id_ficha, $id_artigo]);
         }
 
+        $compostos_alterados = [];
+        if ($tem_compostos) {
+            $pdo->prepare("UPDATE tabela_precos SET composicao_json = ? WHERE id = ?")
+                ->execute([$composto ? json_encode($composto['composicao']) : null, $id_artigo]);
+            // Os compostos que usam este artigo ficam com o preço novo
+            if (!$composto) $compostos_alterados = tpRecalcularCompostos($pdo, $valor_hora_homem, $id_artigo);
+        }
+
         $stmt_fetch = $pdo->prepare("SELECT * FROM tabela_precos WHERE id = ?");
         $stmt_fetch->execute([$id_artigo]);
         $artigo_final = $stmt_fetch->fetch(PDO::FETCH_ASSOC);
 
         ob_end_clean();
-        echo json_encode(['status' => 'success', 'artigo' => $artigo_final, 'is_new' => $is_new]);
+        echo json_encode(['status' => 'success', 'artigo' => $artigo_final, 'is_new' => $is_new, 'compostos' => $compostos_alterados]);
     } catch (Throwable $e) {
         ob_end_clean();
         echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
@@ -304,6 +418,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $tem_acao && !$csrf_ok) {
                 $tipo_mensagem = "erro"; 
             } else {
                 try {
+                    if ($tem_compostos && ($usado = tpCompostosQueUsam($pdo, (int)$id_apagar)))
+                        throw new Exception('este artigo faz parte do(s) composto(s) ' . implode(', ', $usado) . '. Retire-o primeiro desse(s) composto(s).');
                     tpCriarArquivo($pdo);
                     $st_arq = $pdo->prepare("SELECT * FROM tabela_precos WHERE id = ?"); $st_arq->execute([$id_apagar ?: 0]);
                     $pdo->beginTransaction();
@@ -357,6 +473,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $tem_acao && !$csrf_ok) {
                 ]);
                 
                 $pdo->commit();
+                if ($tem_compostos) tpRecalcularCompostos($pdo, $valor_hora_homem);
                 registrarLog($pdo, "Aplicou Margem Global de $margem_global% na Tabela de Preços", "Tabela de Preços");
                 $mensagem = "Margem aplicada com sucesso aos artigos não bloqueados!";
                 $tipo_mensagem = "sucesso";
@@ -456,6 +573,26 @@ natcasesort($marcas_lista);
         .search-input { width: 100%; padding: 10px 15px 10px 40px; border: 1px solid #dcdde1; border-radius: 30px; font-size: 14px; outline: none; transition: 0.2s; font-family: inherit; }
         .search-input:focus { border-color: #3498db; box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1); }
         
+        .comp-tag { display: inline-block; margin-top: 4px; background: #f3e8ff; color: #7c3aed; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 5px; white-space: nowrap; }
+        .comp-tp { border: 1px dashed #d8b4fe; background: #fbf8ff; border-radius: 10px; padding: 10px 12px; }
+        .comp-tp-chk { display: flex !important; align-items: center; gap: 8px; cursor: pointer; color: #6d28d9 !important; font-weight: 700; margin: 0 !important; }
+        .comp-tp-chk span { font-weight: 400; color: #7f8c8d; }
+        .comp-tp-chk input { width: 16px; height: 16px; accent-color: #8b5cf6; }
+        .comp-tp-pesq { position: relative; margin: 10px 0 8px; }
+        .comp-tp-pesq input { width: 100%; }
+        .comp-tp-sug { display: none; position: absolute; left: 0; right: 0; top: 100%; background: #fff; border: 1px solid #dcdde1; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.1); z-index: 50; max-height: 240px; overflow-y: auto; }
+        .comp-tp-sug div { padding: 8px 12px; cursor: pointer; font-size: 13px; border-bottom: 1px solid #f1f2f6; }
+        .comp-tp-sug div:hover { background: #f5f3ff; }
+        .comp-tp-sug small { color: #95a5a6; }
+        .comp-tp-tab { width: 100%; min-width: 0 !important; border-collapse: collapse; font-size: 13px; background: #fff; border-radius: 8px; }
+        .comp-tp-tab th { font-size: 10px; text-transform: uppercase; color: #7f8c8d; text-align: left; padding: 6px 8px; border-bottom: 1px solid #e9d5ff; background: transparent; position: static; }
+        .comp-tp-tab td { padding: 6px 8px; border-bottom: 1px solid #f1f2f6; vertical-align: middle; }
+        .comp-tp-tab .n { text-align: right; white-space: nowrap; }
+        .comp-tp-tab td.n input { width: 70px; text-align: right; padding: 6px; }
+        .comp-tp-tab tfoot td { font-weight: 700; color: #6d28d9; border-bottom: none; }
+        .comp-tp-tab .del { background: none; border: none; color: #e74c3c; cursor: pointer; padding: 4px 6px; }
+        .comp-tp-vazio { color: #95a5a6; text-align: center; padding: 12px !important; }
+        .campo-auto { background: #f5f3ff !important; color: #6d28d9; }
         .header-acoes { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
         .marca-container { position: relative; width: 240px; max-width: 100%; }
         .marca-container i { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: #95a5a6; pointer-events: none; }
@@ -472,6 +609,16 @@ natcasesort($marcas_lista);
         .table-container { background: #fff; border-radius: 12px; border: 1px solid #e1e5ea; box-shadow: 0 2px 10px rgba(0,0,0,0.02); overflow: hidden; }
         .table-responsive { width: 100%; overflow-x: auto; height: 65vh; }
         table { width: 100%; border-collapse: collapse; min-width: 1100px; }
+        /* Tabela de preços compacta: cabe a 100% num ecrã de portátil (sem barra de deslocamento) */
+        #tabelaPrecos { min-width: 0; }
+        #tabelaPrecos th { padding: 10px 6px; font-size: 10.5px; line-height: 1.25; }
+        #tabelaPrecos th:first-child, #tabelaPrecos td:first-child { padding-left: 12px; }
+        #tabelaPrecos td { padding: 9px 6px; font-size: 13px; }
+        #tabelaPrecos td:nth-child(n+4):nth-child(-n+12) { white-space: nowrap; }
+        #tabelaPrecos td:nth-child(1) { word-break: break-word; }
+        #tabelaPrecos .data-info { font-size: 11px; }
+        #tabelaPrecos .acoes { gap: 4px; flex-wrap: nowrap; }
+        #tabelaPrecos .btn-tab-acao { width: 28px; height: 28px; padding: 0; font-size: 13px; }
         th { padding: 12px 15px; background: #f8f9fa; color: #576574; font-size: 11px; text-transform: uppercase; text-align: left; border-bottom: 2px solid #e1e5ea; font-weight: 600; position: sticky; top: 0; z-index: 10;}
         td { padding: 12px 15px; border-bottom: 1px solid #f1f2f6; font-size: 14px; color: #2c3e50; vertical-align: middle; }
         tbody tr.linha-artigo:hover { background-color: #fcfcfc; }
@@ -691,19 +838,19 @@ natcasesort($marcas_lista);
                 <table id="tabelaPrecos">
                     <thead>
                         <tr>
-                            <th style="width: 120px;">Referência</th>
+                            <th style="width: 95px;">Referência</th>
                             <th>Descrição do Artigo</th>
-                            <th style="width: 140px;">Marca / Ficha</th>
-                            <th class="text-center" style="width: 60px;">Unid.</th>
-                            <th class="text-right" style="width: 100px;">Custo Base</th>
-                            <th class="text-center" style="width: 80px;">Margem</th>
-                            <th class="text-right" style="width: 100px;">Preço Mat.</th>
-                            <th class="text-right" style="width: 110px;">Tempo (min)</th>
-                            <th class="text-center" style="width: 70px;">Nº Colab.</th>
-                            <th class="text-right" style="width: 90px;">Valor M.O.</th>
-                            <th class="text-right" style="width: 120px; color:#f39c12;">Preço C/ M.O.</th>
-                            <th class="text-center" style="width: 90px;">Última Alt.</th>
-                            <th class="text-center" style="width: 120px;">Ações</th>
+                            <th style="width: 95px;">Marca / Ficha</th>
+                            <th class="text-center" style="width: 46px;">Unid.</th>
+                            <th class="text-right" style="width: 78px;">Custo Base</th>
+                            <th class="text-center" style="width: 58px;">Margem</th>
+                            <th class="text-right" style="width: 78px;">Preço Mat.</th>
+                            <th class="text-right" style="width: 62px;">Tempo (min)</th>
+                            <th class="text-center" style="width: 46px;">Nº Colab.</th>
+                            <th class="text-right" style="width: 72px;">Valor M.O.</th>
+                            <th class="text-right" style="width: 84px; color:#f39c12;">Preço C/ M.O.</th>
+                            <th class="text-center" style="width: 76px;">Última Alt.</th>
+                            <th class="text-center" style="width: 104px;">Ações</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -726,7 +873,10 @@ natcasesort($marcas_lista);
                             ?>
                                 <tr class="linha-artigo" data-marca="<?= htmlspecialchars(trim((string)($art['marca'] ?? '')), ENT_QUOTES, 'UTF-8') ?>">
                                     <td class="ref-bold"><?= htmlspecialchars($art['referencia'], ENT_QUOTES, 'UTF-8') ?></td>
-                                    <td><?= nl2br(htmlspecialchars($art['descricao'], ENT_QUOTES, 'UTF-8')) ?></td>
+                                    <td><?= nl2br(htmlspecialchars($art['descricao'], ENT_QUOTES, 'UTF-8')) ?><?php
+                                        $n_comp = count(tpLerComposicao($art['composicao_json'] ?? ''));
+                                        if ($n_comp) echo '<br><span class="comp-tag" title="Artigo composto: preço = soma dos artigos que o compõem"><i class="fa-solid fa-layer-group"></i> Composto · ' . $n_comp . ' artigo' . ($n_comp > 1 ? 's' : '') . '</span>';
+                                    ?></td>
                                     <td class="td-marca"><?php
                                         $f_art = $fichas_bib[(int)($art['id_ficha_tecnica'] ?? 0)] ?? null;
                                         if (!empty($art['marca'])) echo '<span class="marca-tag">' . htmlspecialchars($art['marca'], ENT_QUOTES, 'UTF-8') . '</span>';
@@ -845,6 +995,26 @@ natcasesort($marcas_lista);
                                 <button type="button" class="btn-mini verde" id="btnEnviarFicha" onclick="enviarNovaFicha()"><i class="fa-solid fa-cloud-arrow-up"></i> Carregar e ligar a este artigo</button>
                             </div>
                             <div class="ficha-info">A marca é a do campo «Marca» acima. Carregue a ficha técnica e/ou o certificado (pelo menos um). Ficam na biblioteca e podem ser usados noutros artigos.</div>
+                        </div>
+                    </div>
+                    <?php endif; ?>
+
+                    <?php if ($tem_compostos): ?>
+                    <!-- ARTIGO COMPOSTO: vários artigos da tabela (preço = soma automática) -->
+                    <div class="form-group full comp-tp">
+                        <label class="comp-tp-chk"><input type="checkbox" id="compTPAtivo" onchange="compAtivar(this.checked)"> <i class="fa-solid fa-layer-group"></i> Artigo composto <span>(feito de vários artigos desta tabela)</span></label>
+                        <input type="hidden" name="composicao_json" id="form_composicao_json" value="">
+                        <div id="compTPEditor" style="display:none;">
+                            <div class="comp-tp-pesq">
+                                <input type="text" id="compTPPesq" placeholder="Acrescentar artigo (descrição, referência ou marca)…" oninput="compSugerir()" onfocus="compSugerir()" onblur="setTimeout(() => document.getElementById('compTPSug').style.display = 'none', 200)" autocomplete="off">
+                                <div class="comp-tp-sug" id="compTPSug"></div>
+                            </div>
+                            <table class="comp-tp-tab">
+                                <thead><tr><th>Artigo</th><th class="n">Qtd.</th><th class="n">Custo</th><th class="n">Venda</th><th></th></tr></thead>
+                                <tbody id="compTPCorpo"></tbody>
+                                <tfoot><tr><td>Total por 1 <span id="compTPUn">UN</span> (tempo: <span id="compTPTempo">0</span> min)</td><td></td><td class="n" id="compTPCusto">0,00 €</td><td class="n" id="compTPVenda">0,00 €</td><td></td></tr></tfoot>
+                            </table>
+                            <div class="ficha-info">O custo, o tempo e o preço de venda são sempre a soma destes artigos e atualizam-se sozinhos quando o preço de um deles muda. No orçamento, ao escolher este artigo, a linha fica com estes artigos em «Artigos desta linha».</div>
                         </div>
                     </div>
                     <?php endif; ?>
@@ -1168,6 +1338,8 @@ natcasesort($marcas_lista);
                         artigosBD[currentIndexModal] = json.artigo;
                     }
                     
+                    (json.compostos || []).forEach(c => { const k = artigosBD.findIndex(a => String(a.id) === String(c.id)); if (k >= 0) artigosBD[k] = c; });
+                    if ((json.compostos || []).length) mostrarToast('Artigo guardado. ' + json.compostos.length + ' artigo(s) composto(s) atualizado(s).');
                     atualizarBotoesNavegacao();
 
                     if (callbackAfterSave) {
@@ -1432,8 +1604,100 @@ natcasesort($marcas_lista);
             return parseFloat(num).toFixed(dec).replace('.', ',');
         }
 
+        // --- ARTIGO COMPOSTO (preço = soma automática dos componentes) ---
+        let compTP = [];   // [{id, q}]
+        const temCompostos = !!document.getElementById('compTPAtivo');
+        const artPorId = id => artigosBD.find(a => parseInt(a.id, 10) === parseInt(id, 10));
+        function compDe(a) { try { const c = JSON.parse((a && a.composicao_json) || '[]'); return Array.isArray(c) ? c : []; } catch (e) { return []; } }
+        // Regra da pesquisa de material: descrição | referência | marca
+        function rotuloTP(a) { return [a.descricao, a.referencia, a.marca].map(x => String(x || '').trim()).filter(Boolean).join(' | '); }
+        function escTP(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+        function compCarregar(artigo, manter) {
+            if (!temCompostos) return;
+            compTP = compDe(artigo).map(c => ({ id: parseInt(c.id, 10), q: parseFloat(c.q) || 0 }));
+            document.getElementById('compTPAtivo').checked = compTP.length > 0;
+            compAtivar(compTP.length > 0, true);
+        }
+        function compAtivar(on, semConfirmar) {
+            if (!temCompostos) return;
+            if (!on && compTP.length && !semConfirmar && !confirm('Deixar de ser composto? Os artigos da composição saem e o preço passa a ser escrito à mão.')) {
+                document.getElementById('compTPAtivo').checked = true; return;
+            }
+            if (!on) compTP = [];
+            document.getElementById('compTPEditor').style.display = on ? '' : 'none';
+            ['form_preco_custo', 'form_percentagem_lucro', 'form_tempo_mao_obra', 'form_colaboradores'].forEach(id => {
+                const el = document.getElementById(id); el.readOnly = on; el.classList.toggle('campo-auto', on);
+            });
+            if (!on && document.getElementById('form_margem_bloqueada').value === '1') document.getElementById('form_percentagem_lucro').readOnly = true;
+            document.getElementById('icon_lock_margem').style.display = on ? 'none' : '';
+            const fichaBox = document.getElementById('form_ficha_txt'); if (fichaBox) fichaBox.closest('.form-group').style.display = on ? 'none' : '';
+            compDesenhar();
+        }
+        function compSugerir() {
+            const q = document.getElementById('compTPPesq').value.trim().toLowerCase(), box = document.getElementById('compTPSug');
+            if (q.length < 2) { box.style.display = 'none'; return; }
+            const idProprio = parseInt(document.getElementById('form_id_artigo').value || '0', 10);
+            const termos = q.split(/\s+/);
+            const res = artigosBD.filter(a => parseInt(a.id, 10) !== idProprio && !compDe(a).length)
+                .filter(a => { const t = rotuloTP(a).toLowerCase(); return termos.every(x => t.includes(x)); }).slice(0, 12);
+            box.innerHTML = res.length ? '' : '<div style="cursor:default; color:#95a5a6;">Nenhum artigo encontrado (os compostos não entram noutro composto).</div>';
+            res.forEach(a => {
+                const d = document.createElement('div');
+                d.innerHTML = escTP(rotuloTP(a)) + ' <small>· ' + formatNumberToPT(a.preco_custo) + ' € custo · ' + formatNumberToPT(a.preco_com_mo || 0) + ' € venda</small>';
+                d.onmousedown = e => { e.preventDefault(); compTP.push({ id: parseInt(a.id, 10), q: 1 }); document.getElementById('compTPPesq').value = ''; box.style.display = 'none'; compDesenhar(true); };
+                box.appendChild(d);
+            });
+            box.style.display = 'block';
+        }
+        function compDesenhar(focarUltimo) {
+            if (!temCompostos) return;
+            const corpo = document.getElementById('compTPCorpo');
+            document.getElementById('compTPUn').textContent = document.getElementById('form_unidade').value || 'UN';
+            if (!compTP.length) corpo.innerHTML = '<tr><td colspan="5" class="comp-tp-vazio">Procure acima os artigos que fazem este composto.</td></tr>';
+            else corpo.innerHTML = compTP.map((c, i) => {
+                const a = artPorId(c.id);
+                return '<tr><td>' + (a ? escTP(rotuloTP(a)) + ' <small style="color:#95a5a6;">(' + escTP(a.unidade || '') + ')</small>' : '<span style="color:#e74c3c;">Artigo já não existe</span>') + '</td>' +
+                    '<td class="n"><input type="text" inputmode="decimal" value="' + formatNumberToPT(c.q, c.q % 1 ? 3 : 2) + '" oninput="forceComma(this); compTP[' + i + '].q = strToNumLocal(this.value); compTotais();"></td>' +
+                    '<td class="n" id="compTPc' + i + '"></td><td class="n" id="compTPv' + i + '"></td>' +
+                    '<td><button type="button" class="del" title="Retirar" onclick="compTP.splice(' + i + ', 1); compDesenhar();"><i class="fa-solid fa-trash-can"></i></button></td></tr>';
+            }).join('');
+            compTotais();
+            if (focarUltimo) { const ins = corpo.querySelectorAll('tr:last-child input'); if (ins[0]) { ins[0].focus(); ins[0].select(); } }
+        }
+        function compTotais() {
+            if (!temCompostos) return null;
+            let pc = 0, pmat = 0, t = 0, pv = 0;
+            compTP.forEach((c, i) => {
+                const a = artPorId(c.id); if (!a) return;
+                const pci = parseFloat(a.preco_custo) || 0;
+                const vc = c.q * pci, vv = c.q * (parseFloat(a.preco_com_mo) || 0);
+                pc += vc; pv += vv;
+                pmat += c.q * pci * (1 + (parseFloat(a.percentagem_lucro) || 0) / 100);
+                t += c.q * (parseFloat(a.tempo_mao_obra) || 0) * (parseInt(a.n_colaboradores, 10) || 1);
+                const ec = document.getElementById('compTPc' + i), ev = document.getElementById('compTPv' + i);
+                if (ec) ec.textContent = formatNumberToPT(vc) + ' €'; if (ev) ev.textContent = formatNumberToPT(vv) + ' €';
+            });
+            document.getElementById('compTPCusto').textContent = formatNumberToPT(pc) + ' €';
+            document.getElementById('compTPVenda').textContent = formatNumberToPT(pv) + ' €';
+            document.getElementById('compTPTempo').textContent = formatNumberToPT(t);
+            const ativo = document.getElementById('compTPAtivo').checked;
+            document.getElementById('form_composicao_json').value = ativo && compTP.length ? JSON.stringify(compTP.filter(c => c.q > 0)) : '';
+            if (ativo) {
+                // Os campos de preço mostram a soma (no servidor é sempre recalculada)
+                document.getElementById('form_preco_custo').value = formatNumberToPT(pc);
+                document.getElementById('form_percentagem_lucro').value = pc > 0 ? Math.round((pmat / pc - 1) * 100) : 0;
+                document.getElementById('form_tempo_mao_obra').value = formatNumberToPT(t);
+                document.getElementById('form_colaboradores').value = 1;
+                document.getElementById('form_preco_material').value = formatNumberToPT(pmat) + ' €';
+                document.getElementById('form_valor_mo').value = formatNumberToPT((t / 60) * VALOR_HORA_HOMEM) + ' €';
+                document.getElementById('form_preco_final_mo').value = formatNumberToPT(pv) + ' €';
+            }
+            return { pc, pmat, t, pv };
+        }
+
         // --- CÁLCULO MODAL ---
         function calcPrecoFinalModal() {
+            if (temCompostos && document.getElementById('compTPAtivo').checked) { compTotais(); return; }
             let pc = strToNumLocal(document.getElementById('form_preco_custo').value);
             let perc = parseInt(document.getElementById('form_percentagem_lucro').value) || 0;
             
@@ -1465,6 +1729,7 @@ natcasesort($marcas_lista);
             document.getElementById('form_tempo_mao_obra').value = '';
             document.getElementById('form_colaboradores').value = '1';
             preencherFicha(null);
+            compCarregar(null);
             
             calcPrecoFinalModal();
             atualizarBotoesNavegacao();
@@ -1488,6 +1753,7 @@ natcasesort($marcas_lista);
             document.getElementById('form_tempo_mao_obra').value = formatNumberToPT(artigo.tempo_mao_obra || 0);
             document.getElementById('form_colaboradores').value = artigo.n_colaboradores || 1;
             preencherFicha(artigo);
+            compCarregar(artigo);
             
             calcPrecoFinalModal();
             atualizarBotoesNavegacao();
@@ -1511,6 +1777,7 @@ natcasesort($marcas_lista);
             document.getElementById('form_tempo_mao_obra').value = formatNumberToPT(artigo.tempo_mao_obra || 0);
             document.getElementById('form_colaboradores').value = artigo.n_colaboradores || 1;
             preencherFicha(artigo);
+            compCarregar(artigo);
             
             calcPrecoFinalModal(); 
             atualizarBotoesNavegacao();

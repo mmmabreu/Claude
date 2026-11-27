@@ -183,6 +183,16 @@ try {
         }
         unset($tp);
     } catch (Exception $e) {}   // sem marca / biblioteca de fichas: fica só descrição | referência
+    // Artigos compostos (tabela de preços): lista de componentes [{id, q}]
+    try {
+        $comp_tp = [];
+        foreach ($pdo->query("SELECT id, composicao_json FROM tabela_precos WHERE composicao_json IS NOT NULL AND composicao_json <> ''")->fetchAll(PDO::FETCH_ASSOC) as $c) {
+            $l = json_decode((string)$c['composicao_json'], true);
+            if (is_array($l) && $l) $comp_tp[(int)$c['id']] = array_values(array_map(fn($x) => ['id' => (int)($x['id'] ?? 0), 'q' => (float)($x['q'] ?? 0)], $l));
+        }
+        foreach ($tabela_precos_js as &$tp) { if (isset($comp_tp[(int)$tp['id']])) $tp['comp'] = $comp_tp[(int)$tp['id']]; }
+        unset($tp);
+    } catch (Exception $e) {}   // tabela de preços ainda sem a coluna composicao_json
 } catch (Exception $e) {}
 
 // Fichas técnicas dos artigos da tabela de preços (ícone na linha do orçamento): [id_artigo => [u => link, n => nome]]
@@ -2302,7 +2312,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                 matches.slice(0, 8).forEach(item => {
                     const div = document.createElement('div'); div.className = 'preco-autocomplete-item';
                     const pCustoFormatado = formatNumberToPT(item.preco_custo); const pVendaFormatado = item.preco_com_mo ? formatNumberToPT(item.preco_com_mo) : '0,00';
-                    div.innerHTML = `<div>${escapeHTML(rotuloMaterial(item))}</div><strong>Custo: ${pCustoFormatado} € <span style="color:#94a3b8;font-weight:normal;font-size:11px;">| Venda: ${pVendaFormatado} €</span></strong>`;
+                    div.innerHTML = `<div>${escapeHTML(rotuloMaterial(item))}${ehComposto(item) ? ' <span style="color:#7c3aed;font-weight:700;">(composto)</span>' : ''}</div><strong>Custo: ${pCustoFormatado} € <span style="color:#94a3b8;font-weight:normal;font-size:11px;">| Venda: ${pVendaFormatado} €</span></strong>`;
                     div.onmousedown = function(e) {
                         e.preventDefault(); pcInput.value = pCustoFormatado;
                         const pvInput = row.querySelector('.pv'); if (pvInput) pvInput.value = pVendaFormatado;
@@ -2320,6 +2330,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                             if (row.querySelector('.unidade-input')) row.querySelector('.unidade-input').value = item.unidade;
                         }
                         calcular(pcInput); list.style.display = 'none';
+                        if (ehComposto(item)) aplicarCompostoNaLinha(row, item);
                     };
                     list.appendChild(div);
                 });
@@ -2337,12 +2348,47 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             if(lista.length === 0) { container.innerHTML = '<div style="padding:25px; text-align:center; color:var(--gray);">Nenhum artigo encontrado.</div>'; return; }
             lista.forEach(item => {
                 const div = document.createElement('div'); div.className = 'preco-autocomplete-item';
-                div.innerHTML = `<div style="display:flex; justify-content:space-between; width:100%;"><div>${escapeHTML(rotuloMaterial(item))}</div><div style="font-weight:800; color:var(--primary); font-size:15px;">${formatNumberToPT(item.preco_custo)} €</div></div>`;
+                div.innerHTML = `<div style="display:flex; justify-content:space-between; width:100%;"><div>${escapeHTML(rotuloMaterial(item))}${ehComposto(item) ? ' <span style="color:#7c3aed;font-weight:700;">(composto)</span>' : ''}</div><div style="font-weight:800; color:var(--primary); font-size:15px;">${formatNumberToPT(item.preco_custo)} €</div></div>`;
                 div.onclick = function() { selecionarPrecoTabela(item); }; container.appendChild(div);
             });
         }
 
+        // Artigo composto da tabela de preços: a linha fica com os artigos dele em «Artigos desta linha»
+        function ehComposto(item) { return !!(item && Array.isArray(item.comp) && item.comp.length); }
+        function itensDoComposto(item, mult = 1) {
+            return (item.comp || []).map(c => {
+                const a = tabelaPrecosBD.find(x => parseInt(x.id, 10) === parseInt(c.id, 10));
+                if (!a) return null;
+                const it = itemDaTabela(a); it.q = (parseFloat(c.q) || 0) * mult; return it;
+            }).filter(Boolean);
+        }
+        function aplicarCompostoNaLinha(row, item) {
+            if (!row || !ehComposto(item)) return false;
+            const itens = itensDoComposto(item);
+            if (!itens.length) return false;
+            const r4 = v => Math.round(v * 10000) / 10000;
+            let tc = 0, tv = 0, tt = 0;
+            itens.forEach(c => { tc += c.q * c.pc; tv += c.q * c.pv; tt += c.q * c.t; });
+            row.querySelector('.comp-json').value = JSON.stringify(itens.map(c => ({ id: c.id, ref: c.ref, desc: c.desc, un: c.un, q: r4(c.q), pc: r4(c.pc), t: r4(c.t), pv: r4(c.pv) })));
+            const pc = row.querySelector('.p_custo'), pv = row.querySelector('.pv'), tmo = row.querySelector('.t_mo');
+            if (pc) pc.value = formatNumberToPT(tc);
+            if (pv) pv.value = formatNumberToPT(tv);
+            if (tmo) tmo.value = tt > 0 ? formatNumberToPT(tt) : '';
+            const idA = row.querySelector('.id-art-tab'); if (idA) idA.value = '';
+            const mb = row.querySelector('.margem-bloqueada-input'); if (mb) mb.value = 1;
+            marcarFicha(row);
+            calcular(pc || pv);
+            return true;
+        }
+
         function selecionarPrecoTabela(item) {
+            if (linhaAtivaPreco && ehComposto(item)) {
+                if (linhaAtivaPreco.querySelector('.desig-input') && !isModoEditar) linhaAtivaPreco.querySelector('.desig-input').value = item.descricao;
+                if (linhaAtivaPreco.querySelector('.unidade-input') && !isModoEditar) linhaAtivaPreco.querySelector('.unidade-input').value = item.unidade;
+                aplicarCompostoNaLinha(linhaAtivaPreco, item);
+                fecharModalPesquisaPrecos();
+                return;
+            }
             if(linhaAtivaPreco) {
                 // O Ref/Artigo da linha nunca é alterado ao escolher um preço
                 if (linhaAtivaPreco.querySelector('.id-art-tab')) linhaAtivaPreco.querySelector('.id-art-tab').value = item.id || '';
@@ -2617,8 +2663,8 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             box.innerHTML = '';
             res.forEach(({ item }) => {
                 const d = document.createElement('div');
-                d.innerHTML = escapeHTML(rotuloMaterial(item)) + ' <span style="color:#94a3b8;">· ' + numPT(item.preco_custo) + ' € custo · ' + numPT(item.preco_com_mo || 0) + ' € venda</span>';
-                d.onmousedown = e => { e.preventDefault(); compItens.push(itemDaTabela(item)); document.getElementById('compPesquisa').value = ''; box.style.display = 'none'; desenharComposicao(true); };
+                d.innerHTML = escapeHTML(rotuloMaterial(item)) + (ehComposto(item) ? ' <span style="color:#7c3aed;font-weight:700;">(composto)</span>' : '') + ' <span style="color:#94a3b8;">· ' + numPT(item.preco_custo) + ' € custo · ' + numPT(item.preco_com_mo || 0) + ' € venda</span>';
+                d.onmousedown = e => { e.preventDefault(); if (ehComposto(item)) itensDoComposto(item).forEach(c => compItens.push(c)); else compItens.push(itemDaTabela(item)); document.getElementById('compPesquisa').value = ''; box.style.display = 'none'; desenharComposicao(true); };
                 box.appendChild(d);
             });
             box.style.display = 'block';
