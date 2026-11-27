@@ -593,6 +593,12 @@ natcasesort($marcas_lista);
         .comp-tp-tab .del { background: none; border: none; color: #e74c3c; cursor: pointer; padding: 4px 6px; }
         .comp-tp-vazio { color: #95a5a6; text-align: center; padding: 12px !important; }
         .campo-auto { background: #f5f3ff !important; color: #6d28d9; }
+        .ordem-tel { display: none; }
+        th.ordenavel { cursor: pointer; user-select: none; white-space: nowrap; }
+        th.ordenavel:hover { color: #2c3e50; }
+        th.ordenavel i { font-size: 10px; color: #bdc3c7; margin-left: 3px; }
+        th.ordenavel.ativo { color: #2980b9; }
+        th.ordenavel.ativo i { color: #2980b9; }
         .header-acoes { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
         .marca-container { position: relative; width: 240px; max-width: 100%; }
         .marca-container i { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: #95a5a6; pointer-events: none; }
@@ -702,6 +708,7 @@ natcasesort($marcas_lista);
             .form-group.full { grid-column: span 1; }
             .tools-bar { flex-direction: column; align-items: stretch; }
             .search-container, .marca-container { max-width: none; width: 100%; }
+            .ordem-tel { display: block; padding-left: 15px; }
             /* Telemóvel: botões do topo em grelha e cada artigo passa a cartão */
             .header-acoes { display: grid !important; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
             .header-acoes > a, .header-acoes > button { justify-content: center; text-align: center; width: 100%; }
@@ -816,6 +823,12 @@ natcasesort($marcas_lista);
                     <?php endif; ?>
                 </select>
             </div>
+            <select id="ordemTel" class="search-input ordem-tel" onchange="const v = this.value.split(':'); ordemAtual = { campo: v[0], dir: parseInt(v[1], 10) }; ordenarPor(v[0], true);" aria-label="Ordenar">
+                <option value="desc:1">Ordenar: descrição A → Z</option>
+                <option value="desc:-1">Ordenar: descrição Z → A</option>
+                <option value="ref:1">Ordenar: referência A → Z</option>
+                <option value="ref:-1">Ordenar: referência Z → A</option>
+            </select>
             <span id="contagemFiltro" class="contagem-filtro"></span>
 
             <?php if ($is_admin): ?>
@@ -838,8 +851,8 @@ natcasesort($marcas_lista);
                 <table id="tabelaPrecos">
                     <thead>
                         <tr>
-                            <th style="width: 95px;">Referência</th>
-                            <th>Descrição do Artigo</th>
+                            <th style="width: 95px;" class="ordenavel" data-ordem="ref" onclick="ordenarPor('ref')" title="Ordenar por referência">Referência <i class="fa-solid fa-sort"></i></th>
+                            <th class="ordenavel" data-ordem="desc" onclick="ordenarPor('desc')" title="Ordenar por descrição">Descrição do Artigo <i class="fa-solid fa-sort"></i></th>
                             <th style="width: 95px;">Marca / Ficha</th>
                             <th class="text-center" style="width: 46px;">Unid.</th>
                             <th class="text-right" style="width: 78px;">Custo Base</th>
@@ -871,7 +884,7 @@ natcasesort($marcas_lista);
                                 $is_locked = ($art['margem_bloqueada'] ?? 0) == 1;
                                 $lock_icon = $is_locked ? ' <i class="fa-solid fa-lock" style="color:#e74c3c; font-size:10px; margin-left:3px;" title="Margem Bloqueada"></i>' : '';
                             ?>
-                                <tr class="linha-artigo" data-marca="<?= htmlspecialchars(trim((string)($art['marca'] ?? '')), ENT_QUOTES, 'UTF-8') ?>">
+                                <tr class="linha-artigo" data-i="<?= (int)$index ?>" data-marca="<?= htmlspecialchars(trim((string)($art['marca'] ?? '')), ENT_QUOTES, 'UTF-8') ?>">
                                     <td class="ref-bold"><?= htmlspecialchars($art['referencia'], ENT_QUOTES, 'UTF-8') ?></td>
                                     <td><?= nl2br(htmlspecialchars($art['descricao'], ENT_QUOTES, 'UTF-8')) ?><?php
                                         $n_comp = count(tpLerComposicao($art['composicao_json'] ?? ''));
@@ -1061,8 +1074,8 @@ natcasesort($marcas_lista);
 
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-top:25px; gap: 10px; flex-wrap:wrap;">
                     <div style="display:flex; gap:5px; align-items:center;" id="box_navegacao">
-                        <button type="button" id="btn_prev_artigo" class="btn-primary" style="background:#95a5a6; padding:12px 15px; width:auto;" title="Gravar e ir para o Artigo Anterior" onclick="salvarEIrPara(currentIndexModal - 1)"><i class="fa-solid fa-arrow-left"></i></button>
-                        <button type="button" id="btn_next_artigo" class="btn-primary" style="background:#95a5a6; padding:12px 15px; width:auto;" title="Gravar e ir para o Artigo Seguinte" onclick="salvarEIrPara(currentIndexModal + 1)"><i class="fa-solid fa-arrow-right"></i></button>
+                        <button type="button" id="btn_prev_artigo" class="btn-primary" style="background:#95a5a6; padding:12px 15px; width:auto;" title="Gravar e ir para o Artigo Anterior" onclick="if (vizinhoNoEcra(-1) >= 0) salvarEIrPara(vizinhoNoEcra(-1))"><i class="fa-solid fa-arrow-left"></i></button>
+                        <button type="button" id="btn_next_artigo" class="btn-primary" style="background:#95a5a6; padding:12px 15px; width:auto;" title="Gravar e ir para o Artigo Seguinte" onclick="if (vizinhoNoEcra(1) >= 0) salvarEIrPara(vizinhoNoEcra(1))"><i class="fa-solid fa-arrow-right"></i></button>
                         
                         <button type="button" id="btn_dup_modal" class="btn-primary" style="background:#16a085; padding:12px 15px; width:auto; margin-left: 10px;" title="Duplicar este Artigo" onclick="duplicarNoModal()"><i class="fa-solid fa-copy"></i> Duplicar</button>
                     </div>
@@ -1397,6 +1410,43 @@ natcasesort($marcas_lista);
         }
 
         // --- GESTÃO DE NAVEGAÇÃO E DUPLICAÇÃO ---
+        // --- ORDENAR A TABELA (referência ou descrição; 2.º clique inverte). Fica lembrado neste navegador. ---
+        const LS_ORDEM = 'mab_tabela_precos_ordem';
+        let ordemAtual = { campo: 'desc', dir: 1 };
+        const colPT = new Intl.Collator('pt', { sensitivity: 'base', numeric: true });
+        function ordenarPor(campo, manterDir) {
+            if (!manterDir) ordemAtual = { campo, dir: ordemAtual.campo === campo ? -ordemAtual.dir : 1 };
+            const tbody = document.querySelector('#tabelaPrecos tbody');
+            const linhas = [...tbody.querySelectorAll('tr.linha-artigo')];
+            const chave = tr => { const a = artigosBD[parseInt(tr.dataset.i, 10)] || {}; return String((ordemAtual.campo === 'ref' ? a.referencia : a.descricao) || '').trim(); };
+            linhas.sort((x, y) => {
+                const kx = chave(x), ky = chave(y);
+                if (!kx !== !ky) return kx ? -1 : 1;   // vazios no fim
+                return ordemAtual.dir * (colPT.compare(kx, ky) || colPT.compare(String((artigosBD[x.dataset.i] || {}).referencia || ''), String((artigosBD[y.dataset.i] || {}).referencia || '')));
+            });
+            const msg = document.getElementById('msgVaziaFiltro');
+            linhas.forEach(tr => tbody.insertBefore(tr, msg && msg.parentNode === tbody ? msg : null));
+            document.querySelectorAll('th.ordenavel').forEach(th => {
+                const ativo = th.dataset.ordem === ordemAtual.campo;
+                th.classList.toggle('ativo', ativo);
+                th.querySelector('i').className = 'fa-solid ' + (ativo ? (ordemAtual.dir > 0 ? 'fa-sort-up' : 'fa-sort-down') : 'fa-sort');
+            });
+            const sel = document.getElementById('ordemTel'); if (sel) sel.value = ordemAtual.campo + ':' + ordemAtual.dir;
+            try { localStorage.setItem(LS_ORDEM, JSON.stringify(ordemAtual)); } catch (e) {}
+        }
+        window.addEventListener('DOMContentLoaded', () => {
+            try { const o = JSON.parse(localStorage.getItem(LS_ORDEM) || 'null'); if (o && (o.campo === 'ref' || o.campo === 'desc')) ordemAtual = { campo: o.campo, dir: o.dir === -1 ? -1 : 1 }; } catch (e) {}
+            ordenarPor(ordemAtual.campo, true);
+        });
+        // Índice (em artigosBD) do artigo anterior / seguinte na ordem do ecrã; -1 se não houver
+        function vizinhoNoEcra(delta) {
+            const ordem = [...document.querySelectorAll('#tabelaPrecos tr.linha-artigo')].filter(tr => tr.style.display !== 'none').map(tr => parseInt(tr.dataset.i, 10));
+            const pos = ordem.indexOf(currentIndexModal);
+            if (pos < 0) { const n = currentIndexModal + delta; return (n >= 0 && n < artigosBD.length) ? n : -1; }
+            const v = ordem[pos + delta];
+            return v === undefined ? -1 : v;
+        }
+
         function atualizarBotoesNavegacao() {
             const btnPrev = document.getElementById('btn_prev_artigo');
             const btnNext = document.getElementById('btn_next_artigo');
@@ -1413,19 +1463,12 @@ natcasesort($marcas_lista);
             btnNext.style.display = 'inline-flex';
             btnDup.style.display = 'inline-flex';
             
-            if (currentIndexModal <= 0) {
-                btnPrev.style.visibility = 'hidden';
-            } else {
-                btnPrev.style.visibility = 'visible';
-                btnPrev.onclick = function() { salvarEIrPara(currentIndexModal - 1); };
-            }
-            
-            if (currentIndexModal >= artigosBD.length - 1) {
-                btnNext.style.visibility = 'hidden';
-            } else {
-                btnNext.style.visibility = 'visible';
-                btnNext.onclick = function() { salvarEIrPara(currentIndexModal + 1); };
-            }
+            // Anterior / seguinte pela ordem (e filtro) que está no ecrã
+            const ant = vizinhoNoEcra(-1), seg = vizinhoNoEcra(1);
+            btnPrev.style.visibility = ant < 0 ? 'hidden' : 'visible';
+            btnPrev.onclick = function() { if (vizinhoNoEcra(-1) >= 0) salvarEIrPara(vizinhoNoEcra(-1)); };
+            btnNext.style.visibility = seg < 0 ? 'hidden' : 'visible';
+            btnNext.onclick = function() { if (vizinhoNoEcra(1) >= 0) salvarEIrPara(vizinhoNoEcra(1)); };
         }
 
         // ---------- REFERÊNCIAS ÚNICAS ----------

@@ -168,7 +168,7 @@ try {
 // --- CARREGAR TABELA DE PREÇOS ---
 $tabela_precos_js = [];
 try {
-    $stmt_tp = $pdo->query("SELECT id, referencia, descricao, preco_custo, preco_com_mo, unidade, tempo_mao_obra, n_colaboradores, margem_bloqueada FROM tabela_precos");
+    $stmt_tp = $pdo->query("SELECT id, referencia, descricao, preco_custo, preco_com_mo, unidade, tempo_mao_obra, n_colaboradores, margem_bloqueada FROM tabela_precos ORDER BY descricao ASC, referencia ASC");
     if ($stmt_tp) {
         $tabela_precos_js = $stmt_tp->fetchAll(PDO::FETCH_ASSOC);
     }
@@ -2301,12 +2301,25 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             return score;
         }
 
+        // Resultados da pesquisa por ordem da designação: primeiro os que têm TODAS as palavras pesquisadas
+        // (por ordem alfabética), depois os parecidos (também por ordem alfabética).
+        const colPT = new Intl.Collator('pt', { sensitivity: 'base', numeric: true });
+        function pesquisarArtigos(lista, pesquisa) {
+            const tokens = (pesquisa.trim().toLowerCase().match(/[a-zà-ÿ0-9]+/g) || []).filter(t => t.length >= 2);
+            return lista.map(item => {
+                const score = pontuarArtigo(item, pesquisa);
+                const txt = (String(item.referencia || '') + ' ' + String(item.descricao || '') + ' ' + String(item.marca || '')).toLowerCase();
+                return { item, score, todos: tokens.length > 0 && tokens.every(t => txt.includes(t)) };
+            }).filter(x => x.score > 0)
+              .sort((a, b) => (b.todos - a.todos) || colPT.compare(String(a.item.descricao || ''), String(b.item.descricao || '')) || colPT.compare(String(a.item.referencia || ''), String(b.item.referencia || '')))
+              .map(x => x.item);
+        }
+
         function mostrarPrecos(pcInput) {
             const row = pcInput.closest('tr'); const desigInput = row.querySelector('.desig-input'); if (!desigInput) return;
             const pesquisa = desigInput.value; const list = row.querySelector('.preco-autocomplete-list');
             if (pesquisa.trim().length < 2) { list.style.display = 'none'; return; }
-            let scoredItems = tabelaPrecosBD.map(item => { return { item: item, score: pontuarArtigo(item, pesquisa) }; });
-            let matches = scoredItems.filter(x => x.score > 0).sort((a, b) => b.score - a.score).map(x => x.item);
+            let matches = pesquisarArtigos(tabelaPrecosBD, pesquisa);
             if (matches.length > 0) {
                 list.innerHTML = '<div style="padding:8px 15px; background:var(--light-bg); font-size:11px; font-weight:700; color:var(--gray); border-bottom:1px solid var(--border-color); text-transform:uppercase;">Sugestões Inteligentes</div>';
                 matches.slice(0, 8).forEach(item => {
@@ -2341,7 +2354,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
         function esconderPrecos(pcInput) { setTimeout(() => { const list = pcInput.closest('tr').querySelector('.preco-autocomplete-list'); if(list) list.style.display = 'none'; }, 150); }
         function abrirModalPesquisaPrecos(btn) { linhaAtivaPreco = btn.closest('tr'); const desigOriginal = linhaAtivaPreco.querySelector('.desig-input').value; const inputPesquisa = document.getElementById('inputFiltroPrecos'); inputPesquisa.value = desigOriginal; document.getElementById('modalPesquisaPrecos').classList.add('show'); filtrarListaPrecos(); setTimeout(() => inputPesquisa.focus(), 100); }
         function fecharModalPesquisaPrecos() { document.getElementById('modalPesquisaPrecos').classList.remove('show'); linhaAtivaPreco = null; }
-        function filtrarListaPrecos() { const pesquisa = document.getElementById('inputFiltroPrecos').value; if (pesquisa.trim() === '') { renderListaPrecos(tabelaPrecosBD.slice(0, 50)); return; } let scoredItems = tabelaPrecosBD.map(item => { return { item: item, score: pontuarArtigo(item, pesquisa) }; }); let filtrados = scoredItems.filter(x => x.score > 0).sort((a, b) => b.score - a.score).map(x => x.item); renderListaPrecos(filtrados.slice(0, 50)); }
+        function filtrarListaPrecos() { const pesquisa = document.getElementById('inputFiltroPrecos').value; if (pesquisa.trim() === '') { renderListaPrecos(tabelaPrecosBD.slice(0, 50)); return; } renderListaPrecos(pesquisarArtigos(tabelaPrecosBD, pesquisa).slice(0, 50)); }
 
         function renderListaPrecos(lista) {
             const container = document.getElementById('listaPrecosContainer'); container.innerHTML = ''; container.style.display = 'block';
@@ -2658,7 +2671,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
         function compSugestoes() {
             const q = document.getElementById('compPesquisa').value, box = document.getElementById('compSug');
             if (q.trim().length < 2) { box.style.display = 'none'; return; }
-            const res = tabelaPrecosBD.map(item => ({ item, score: pontuarArtigo(item, q) })).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 10);
+            const res = pesquisarArtigos(tabelaPrecosBD, q).slice(0, 10).map(item => ({ item }));
             if (!res.length) { box.innerHTML = '<div style="color:#94a3b8; cursor:default;">Nenhum artigo encontrado.</div>'; box.style.display = 'block'; return; }
             box.innerHTML = '';
             res.forEach(({ item }) => {
