@@ -321,7 +321,12 @@ function linhasAuto($lista, $suplementar, $fmt) {
             thead { display: table-header-group; }
             .data-table tfoot { display: table-row-group; } 
             
-            tr { page-break-inside: avoid; }
+            /* Só as linhas de artigos não se partem entre folhas. A linha "invisível" que contém a tabela inteira
+               TEM de poder partir-se: se não, o browser empurra a tabela toda para a folha seguinte e a primeira
+               folha fica só com o cabeçalho. */
+            .data-table tr { page-break-inside: avoid; break-inside: avoid; }
+            table.wrapper-table > tbody > tr, table.wrapper-table > tbody > tr > td { page-break-inside: auto; break-inside: auto; }
+            .data-table thead { display: table-header-group; }
 
             /* Fixa o rodapé mais abaixo no A4 na impressão */
             .page-footer-content {
