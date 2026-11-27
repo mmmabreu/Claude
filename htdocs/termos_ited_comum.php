@@ -14,6 +14,8 @@
 //   termos_ited_arquivo  -> NUNCA PERDER DADOS: cópia do termo e dos pontos antes de cada alteração ou eliminação
 // Os dados do técnico da última gravação ficam em configuracoes (chaves ited_*) e preenchem os termos novos.
 // O equipamento de ensaio vem SEMPRE pré-preenchido com o certificador da empresa ($ITED_EQUIPAMENTO).
+// Cabo instalado: artigo da tabela de preços (id_artigo_cabo) + texto gravado (cabo_texto, para o relatório não
+// mudar se o artigo for alterado depois). A categoria dos pontos sai da descrição do cabo (Cat. 6, 6A, …).
 // O projeto ITED é opcional (tem_projeto = 0 → "Sem projeto ITED" e o texto do termo não fala no projeto).
 // =====================================================================
 
@@ -50,6 +52,8 @@ function itedCriarTabelas($pdo) {
         entidade_registo VARCHAR(60) NOT NULL DEFAULT '',
         assinatura TINYINT(1) NOT NULL DEFAULT 1,
         texto_termo TEXT NULL,
+        id_artigo_cabo INT NULL,
+        cabo_texto VARCHAR(255) NOT NULL DEFAULT '',
         equip_teste VARCHAR(150) NOT NULL DEFAULT '',
         equip_serie VARCHAR(80) NOT NULL DEFAULT '',
         equip_calibracao DATE NULL,
@@ -59,6 +63,8 @@ function itedCriarTabelas($pdo) {
         criado_por INT NULL, criado_em DATETIME NULL, atualizado_em DATETIME NULL,
         KEY idx_obra (id_obra)
     ) DEFAULT CHARSET=utf8mb4");
+    if (!$pdo->query("SHOW COLUMNS FROM termos_ited LIKE 'id_artigo_cabo'")->fetch())
+        $pdo->exec("ALTER TABLE termos_ited ADD COLUMN id_artigo_cabo INT NULL AFTER texto_termo, ADD COLUMN cabo_texto VARCHAR(255) NOT NULL DEFAULT '' AFTER id_artigo_cabo");
     if (!$pdo->query("SHOW COLUMNS FROM termos_ited LIKE 'tem_projeto'")->fetch())
         $pdo->exec("ALTER TABLE termos_ited ADD COLUMN tem_projeto TINYINT(1) NOT NULL DEFAULT 1 AFTER n_fogos");
     $pdo->exec("CREATE TABLE IF NOT EXISTS termos_ited_pontos (
@@ -150,6 +156,31 @@ function itedResumo($pontos) {
         if ($p['comprimento'] !== null && $p['comprimento'] !== '') $comp[] = (float)$p['comprimento'];
     }
     return [$n, $ok, $n - $ok, $comp ? max($comp) : null, $comp ? array_sum($comp) / count($comp) : null];
+}
+
+// Categoria a partir da descrição do cabo ("Cabo U/UTP Cat6A LSZH" → "Cat. 6A")
+function itedCategoriaDoCabo($txt) {
+    if (preg_match('/cat\.?\s*(5e|6a|6|7a|7|8)\b/i', (string)$txt, $m)) return 'Cat. ' . (strtolower($m[1]) === '5e' ? '5e' : strtoupper($m[1]));
+    return '';
+}
+
+// Cabos de dados da tabela de preços (UTP / FTP / STP ou com a categoria na descrição), com a ficha / certificado
+function itedCabosTabela($pdo) {
+    $res = [];
+    try {
+        $tem_fichas = (bool)$pdo->query("SHOW TABLES LIKE 'fichas_tecnicas'")->fetch();
+        $sql = $tem_fichas
+            ? "SELECT t.id, t.referencia, t.descricao, t.marca, f.ficheiro AS ft, f.cert_ficheiro AS ct FROM tabela_precos t LEFT JOIN fichas_tecnicas f ON f.id = t.id_ficha_tecnica AND f.ativo = 1"
+            : "SELECT t.id, t.referencia, t.descricao, t.marca, '' AS ft, '' AS ct FROM tabela_precos t";
+        foreach ($pdo->query($sql . " ORDER BY t.descricao ASC")->fetchAll(PDO::FETCH_ASSOC) as $a) {
+            $d = (string)$a['descricao'];
+            // Só cabos de dados (pares de cobre): U/UTP, F/UTP, S/FTP, F/FTP… ou com a categoria na descrição
+            if (!preg_match('/\b(([usf]{1,2}\/?)?(utp|ftp|stp)|cat\.?\s*(5e|6a|6|7a|7|8))\b/i', $d)) continue;
+            $res[] = ['id' => (int)$a['id'], 'r' => trim((string)$a['referencia']), 'd' => trim($d), 'm' => trim((string)($a['marca'] ?? '')),
+                      'cat' => itedCategoriaDoCabo($d), 'ft' => (string)$a['ft'] !== '' ? 1 : 0, 'ct' => (string)$a['ct'] !== '' ? 1 : 0];
+        }
+    } catch (Exception $e) {}
+    return $res;
 }
 
 // Texto padrão do termo de responsabilidade (pode ser alterado no formulário de cada termo)

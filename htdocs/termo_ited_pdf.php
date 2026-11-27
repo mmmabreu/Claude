@@ -138,6 +138,7 @@ if ($doc === 'termo') {
     $pdf->Pares([['Equipamento:', $t['equip_teste']], ['N.º de série:', $t['equip_serie']], ['Calibração:', dataPT($t['equip_calibracao'])]]);
     $pdf->Pares([['Data dos ensaios:', dataPT($t['data_ensaios'] ?: $t['data_emissao'])], ['Técnico:', $t['tecnico_nome']], ['Inscrição ANACOM:', $t['tecnico_inscricao']]]);
     $pdf->Pares([['Norma / limite:', $t['norma_teste']]]);
+    if (trim((string)($t['cabo_texto'] ?? '')) !== '') $pdf->Pares([['Cabo instalado:', $t['cabo_texto']]]);
 
     [$n, $ok, $falha, $cmax, $cmed] = itedResumo($pontos);
     $pdf->Ln(3);

@@ -50,9 +50,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'projeto_data' => !empty($_POST['tem_projeto']) ? $d($_POST['projeto_data'] ?? '') : null,
             'tecnico_nome' => $txt('tecnico_nome', 150), 'tecnico_inscricao' => $txt('tecnico_inscricao', 60), 'entidade_registo' => $txt('entidade_registo', 60),
             'assinatura' => !empty($_POST['assinatura']) ? 1 : 0, 'texto_termo' => trim((string)($_POST['texto_termo'] ?? '')) ?: null,
+            'id_artigo_cabo' => null, 'cabo_texto' => '',
             'equip_teste' => $txt('equip_teste', 150), 'equip_serie' => $txt('equip_serie', 80), 'equip_calibracao' => $d($_POST['equip_calibracao'] ?? ''),
             'norma_teste' => $txt('norma_teste', 150), 'data_ensaios' => $d($_POST['data_ensaios'] ?? ''), 'observacoes' => trim((string)($_POST['observacoes'] ?? '')) ?: null,
         ];
+        // Cabo instalado (artigo da tabela de preços); o texto fica gravado para o relatório
+        $id_cabo = filter_input(INPUT_POST, 'id_artigo_cabo', FILTER_VALIDATE_INT);
+        foreach (itedCabosTabela($pdo) as $cb) if ($cb['id'] === $id_cabo) {
+            $campos['id_artigo_cabo'] = $id_cabo;
+            $campos['cabo_texto'] = mb_substr(implode(' · ', array_filter([$cb['r'], $cb['d'], $cb['m']])), 0, 255);
+        }
         // Pontos RJ45
         $pontos = json_decode((string)($_POST['pontos_json'] ?? '[]'), true);
         if (!is_array($pontos)) $pontos = [];
@@ -110,12 +117,13 @@ $t = $termo ?: [
     'tipo_edificio' => 'Residencial', 'edificio' => '', 'morada' => '', 'localidade' => '', 'n_fogos' => '',
     'tem_projeto' => 1, 'projetista_nome' => '', 'projetista_inscricao' => '', 'projeto_data' => '',
     'tecnico_nome' => $cfg['ited_tecnico_nome'], 'tecnico_inscricao' => $cfg['ited_tecnico_inscricao'], 'entidade_registo' => $cfg['ited_entidade_registo'],
-    'assinatura' => 1, 'texto_termo' => '', 'equip_teste' => '', 'equip_serie' => '',
+    'assinatura' => 1, 'texto_termo' => '', 'id_artigo_cabo' => null, 'cabo_texto' => '', 'equip_teste' => '', 'equip_serie' => '',
     'equip_calibracao' => '', 'norma_teste' => $cfg['ited_norma_teste'], 'data_ensaios' => date('Y-m-d'), 'observacoes' => '',
 ];
 // Equipamento de ensaio: sempre pré-preenchido com o certificador da empresa (nos termos antigos, se estiver vazio)
 foreach ($ITED_EQUIPAMENTO as $k => $v) if (trim((string)($t[$k] ?? '')) === '') $t[$k] = $v;
 $pontos = ($id && empty($_POST)) ? itedPontos($pdo, $id) : (isset($limpos) ? array_map(fn($p) => array_combine(['identificacao', 'localizacao', 'painel_porta', 'categoria', 'configuracao', 'comprimento', 'mapa', 'margem_next', 'resultado', 'observacoes'], $p), $limpos) : []);
+$cabos = itedCabosTabela($pdo);
 $e = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
 $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP;
 ?>
@@ -281,6 +289,12 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
             <div class="card">
                 <h2><i class="fa-solid fa-gauge-high"></i> 5. Ensaios</h2>
                 <div class="grid">
+                    <div class="fg full"><label>Cabo instalado (tabela de preços)</label>
+                        <input type="hidden" name="id_artigo_cabo" id="id_artigo_cabo" value="<?= (int)($t['id_artigo_cabo'] ?? 0) ?: '' ?>">
+                        <input type="text" id="cabo_txt" list="dl_cabos" autocomplete="off" placeholder="Escreva parte da referência ou da descrição (ex.: Cat6, U/UTP…)" onchange="caboEscolhido()" value="">
+                        <datalist id="dl_cabos"></datalist>
+                        <div class="ajuda" id="caboInfo"><?= ($t['cabo_texto'] ?? '') !== '' && empty($t['id_artigo_cabo']) ? 'Gravado: ' . $e($t['cabo_texto']) . ' (o artigo já não está na tabela de preços)' : '' ?></div>
+                    </div>
                     <div class="fg"><label>Equipamento de ensaio (marca / modelo)</label><input type="text" name="equip_teste" maxlength="150" value="<?= $e($t['equip_teste']) ?>" placeholder="ex.: Fluke DSX-5000"></div>
                     <div class="fg"><label>Nº de série</label><input type="text" name="equip_serie" maxlength="80" value="<?= $e($t['equip_serie']) ?>"></div>
                     <div class="fg"><label>Última calibração</label><input type="date" name="equip_calibracao" value="<?= $e($t['equip_calibracao']) ?>"></div>
@@ -349,7 +363,44 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     const PONTOS = <?= json_encode(array_values($pontos), $JSON) ?>;
     const CATEGORIAS = <?= json_encode($ITED_CATEGORIAS, $JSON) ?>;
     const CONFIGS = <?= json_encode($ITED_CONFIGURACOES, $JSON) ?>;
-    const CAT_PADRAO = <?= json_encode(stripos($cfg['ited_norma_teste'], '6A') !== false ? 'Cat. 6A' : 'Cat. 6') ?>;
+    let CAT_PADRAO = <?= json_encode(stripos($cfg['ited_norma_teste'], '6A') !== false ? 'Cat. 6A' : 'Cat. 6') ?>;
+    const CABOS = <?= json_encode($cabos, $JSON) ?>;
+    const CABO_ROTULO = {}, CABO_ID = {};
+    function iniciarCabo() {
+        const dl = document.getElementById('dl_cabos');
+        CABOS.forEach(c => { c.l = [c.r, c.d, c.m].filter(Boolean).join(' · '); CABO_ROTULO[c.l] = c; CABO_ID[c.id] = c;
+            const o = document.createElement('option'); o.value = c.l; dl.appendChild(o); });
+        const atual = CABO_ID[parseInt(document.getElementById('id_artigo_cabo').value || 0, 10)];
+        if (atual) { document.getElementById('cabo_txt').value = atual.l; mostrarCabo(atual); if (atual.cat) CAT_PADRAO = atual.cat; }
+    }
+    function mostrarCabo(c) {
+        const info = document.getElementById('caboInfo');
+        if (!c) { info.textContent = ''; return; }
+        info.innerHTML = (c.cat ? 'Categoria: <b>' + esc(c.cat) + '</b> · ' : 'Sem categoria na descrição · ')
+            + '<span style="color:' + (c.ft ? '#1e8449' : '#c0392b') + '">' + (c.ft ? '✓' : '✗') + ' ficha técnica</span> · '
+            + '<span style="color:' + (c.ct ? '#1e8449' : '#c0392b') + '">' + (c.ct ? '✓' : '✗') + ' certificado</span>';
+    }
+    // Escolher o cabo: a categoria passa a ser a do cabo (e pode aplicar-se aos pontos já criados)
+    function caboEscolhido() {
+        const inp = document.getElementById('cabo_txt'), c = CABO_ROTULO[inp.value];
+        document.getElementById('id_artigo_cabo').value = c ? c.id : '';
+        if (!c) { if (inp.value !== '') inp.value = ''; mostrarCabo(null); return; }
+        mostrarCabo(c);
+        if (!c.cat) return;
+        CAT_PADRAO = c.cat;
+        // Norma / limite de ensaio de acordo com a categoria do cabo
+        const CLASSES = { 'Cat. 5e': 'Classe D (Cat. 5e)', 'Cat. 6': 'Classe E (Cat. 6)', 'Cat. 6A': 'Classe EA (Cat. 6A)', 'Cat. 7': 'Classe F (Cat. 7)', 'Cat. 7A': 'Classe FA (Cat. 7A)', 'Cat. 8': 'Classe I (Cat. 8)' };
+        const norma = document.querySelector('[name="norma_teste"]'), nova = CLASSES[c.cat];
+        if (nova && !norma.value.includes(nova)) {
+            const proposta = /Classe\s+\w+\s*\(Cat\.\s*\w+\)/.test(norma.value) ? norma.value.replace(/Classe\s+\w+\s*\(Cat\.\s*\w+\)/, nova) : 'ISO/IEC 11801 ' + nova + ' — Ligação permanente';
+            if (confirm('Atualizar a norma / limite de ensaio para:\n' + proposta + ' ?')) norma.value = proposta;
+        }
+        document.getElementById('g_cat').value = c.cat;
+        const outros = Array.from(document.querySelectorAll('#corpoPontos .p-cat')).filter(s => s.value !== c.cat);
+        if (outros.length && confirm('Aplicar a categoria ' + c.cat + ' aos ' + outros.length + ' ponto(s) já criados?')) {
+            outros.forEach(s => { if (![...s.options].some(o => o.value === c.cat)) s.add(new Option(c.cat, c.cat)); s.value = c.cat; });
+        }
+    }
     const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
     // ---------- Obra ----------
@@ -511,6 +562,7 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     });
 
     (function () {
+        iniciarCabo();
         PONTOS.forEach(p => addPonto(p));
         if (!PONTOS.length) atualizar();
         const menu = document.querySelector('.user-menu');
