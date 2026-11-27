@@ -3,11 +3,7 @@ session_start();
 require_once 'db.php';
 
 // REGRA DE OURO: Funções centralizadas
-if (file_exists('functions.php')) {
-    require_once 'functions.php';
-} else {
-    function registrarLog($pdo, $acao, $modulo) { return true; }
-}
+require_once 'functions.php';
 
 // REGRA DE OURO 1: Validação de sessão
 if (!isset($_SESSION['user_id'])) {
@@ -47,7 +43,25 @@ $obra_selecionada = filter_input(INPUT_GET, 'id_obra', FILTER_VALIDATE_INT);
 // continua a usar-se o botão próprio no obra_despesas.php.
 $mensagem_despesa = ''; $tipo_mensagem_despesa = '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && $obra_selecionada) {
+// NUNCA PERDER DADOS: antes de editar ou apagar uma despesa manual, guarda uma cópia em obra_despesas_arquivo
+function arquivarDespesa($pdo, $id_despesa, $acao) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS obra_despesas_arquivo (
+        id INT AUTO_INCREMENT PRIMARY KEY, id_despesa INT NOT NULL, acao VARCHAR(20) NOT NULL,
+        dados_json MEDIUMTEXT NOT NULL, arquivado_por INT NULL, arquivado_em DATETIME NOT NULL, KEY idx_despesa (id_despesa)
+    ) DEFAULT CHARSET=utf8mb4");
+    $st = $pdo->prepare("SELECT * FROM obra_despesas WHERE id = ?");
+    $st->execute([$id_despesa]);
+    if ($d = $st->fetch(PDO::FETCH_ASSOC)) {
+        $pdo->prepare("INSERT INTO obra_despesas_arquivo (id_despesa, acao, dados_json, arquivado_por, arquivado_em) VALUES (?, ?, ?, ?, NOW())")
+            ->execute([$id_despesa, $acao, safe_json_encode($d), $_SESSION['user_id']]);
+    }
+}
+
+// REGRA DE OURO 7: token CSRF em todos os formulários
+$csrf_falhou = ($_SERVER['REQUEST_METHOD'] === 'POST' && !validar_csrf_token($_POST['csrf_token'] ?? ''));
+if ($csrf_falhou) { $mensagem_despesa = "A sessão expirou ou o pedido não é válido. Atualize a página e tente de novo."; $tipo_mensagem_despesa = "erro"; }
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $obra_selecionada && !$csrf_falhou) {
 
     // Registar nova despesa manual
     if (isset($_POST['add_despesa'])) {
@@ -65,7 +79,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $obra_selecionada) {
             header("Location: gestao.php?id_obra=" . $obra_selecionada . "&despesa=1");
             exit;
         } catch (Throwable $e) {
-            $mensagem_despesa = "Erro ao registar despesa: " . $e->getMessage();
+            error_log('gestao.php: ' . $e->getMessage()); $mensagem_despesa = "Não foi possível concluir a operação. Nada foi alterado.";
             $tipo_mensagem_despesa = "erro";
         }
     }
@@ -80,13 +94,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $obra_selecionada) {
         $quantidade = !empty($_POST['quantidade']) ? (float)str_replace(',', '.', $_POST['quantidade']) : 0;
 
         try {
+            arquivarDespesa($pdo, $id_edit, 'editado');
             $pdo->prepare("UPDATE obra_despesas SET tipo_despesa = ?, data_despesa = ?, descricao = ?, quantidade = ?, valor = ? WHERE id = ? AND obra_id = ? AND origem = 'Manual'")
                 ->execute([$tipo, $data, $descricao, $quantidade, $valor, $id_edit, $obra_selecionada]);
             registrarLog($pdo, "Editou despesa manual (ID: $id_edit) na Obra #$obra_selecionada", "Obras - Financeiro");
             header("Location: gestao.php?id_obra=" . $obra_selecionada . "&despesa=2");
             exit;
         } catch (Throwable $e) {
-            $mensagem_despesa = "Erro ao atualizar despesa: " . $e->getMessage();
+            error_log('gestao.php: ' . $e->getMessage()); $mensagem_despesa = "Não foi possível concluir a operação. Nada foi alterado.";
             $tipo_mensagem_despesa = "erro";
         }
     }
@@ -109,21 +124,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $obra_selecionada) {
             header("Location: gestao.php?id_obra=" . $obra_selecionada . "&despesa=3");
             exit;
         } catch (Throwable $e) {
-            $mensagem_despesa = "Erro ao duplicar despesa: " . $e->getMessage();
+            error_log('gestao.php: ' . $e->getMessage()); $mensagem_despesa = "Não foi possível concluir a operação. Nada foi alterado.";
             $tipo_mensagem_despesa = "erro";
         }
     }
 
-    // Apagar despesa manual
+    // Apagar despesa manual (com a password de segurança; fica uma cópia no arquivo)
     if (isset($_POST['apagar_despesa_id'])) {
+        $id_apagar = (int)$_POST['apagar_despesa_id'];
+        $st_pw = $pdo->prepare("SELECT valor FROM configuracoes WHERE chave = 'password_apagar' LIMIT 1");
+        $st_pw->execute();
+        $pw_sistema = (string)$st_pw->fetchColumn();
+        if ($pw_sistema === '' || !hash_equals($pw_sistema, (string)($_POST['pass_seguranca'] ?? ''))) {
+            $mensagem_despesa = "Password de segurança incorreta. A despesa não foi apagada."; $tipo_mensagem_despesa = "erro";
+        } else
         try {
+            $st_ok = $pdo->prepare("SELECT id FROM obra_despesas WHERE id = ? AND obra_id = ? AND origem = 'Manual'");
+            $st_ok->execute([$id_apagar, $obra_selecionada]);
+            if ($st_ok->fetchColumn()) arquivarDespesa($pdo, $id_apagar, 'apagado');
             $pdo->prepare("DELETE FROM obra_despesas WHERE id = ? AND obra_id = ? AND origem = 'Manual'")
-                ->execute([$_POST['apagar_despesa_id'], $obra_selecionada]);
+                ->execute([$id_apagar, $obra_selecionada]);
             registrarLog($pdo, "Apagou despesa manual (ID: " . $_POST['apagar_despesa_id'] . ") na Obra #$obra_selecionada", "Obras - Financeiro");
             header("Location: gestao.php?id_obra=" . $obra_selecionada . "&despesa=4");
             exit;
         } catch (Throwable $e) {
-            $mensagem_despesa = "Erro ao remover despesa: " . $e->getMessage();
+            error_log('gestao.php: ' . $e->getMessage()); $mensagem_despesa = "Não foi possível concluir a operação. Nada foi alterado.";
             $tipo_mensagem_despesa = "erro";
         }
     }
@@ -151,7 +176,8 @@ try {
                                 ORDER BY c.nome ASC, o.nome ASC");
     $obras_lista = $stmt_obras->fetchAll(PDO::FETCH_ASSOC);
 } catch (Exception $e) {
-    die("Erro ao carregar obras: " . $e->getMessage());
+    error_log('gestao.php (obras): ' . $e->getMessage());
+    die("Não foi possível carregar as obras. Avise o administrador.");
 }
 
 // Valores por defeito
@@ -202,11 +228,12 @@ if ($obra_selecionada) {
 
                 // 1a. HORAS DE TRABALHO ORÇAMENTADAS
                 // Soma do tempo de mão de obra de todas as linhas do orçamento:
-                // tempo_mao_obra é por unidade, por isso multiplica-se pela quantidade da linha
+                // tempo_mao_obra é por unidade e em MINUTOS (como na tabela de preços), por isso multiplica-se
+                // pela quantidade da linha e divide-se por 60
                 try {
                     $stmt_horas_orc = $pdo->prepare("SELECT SUM(COALESCE(quantidade, 0) * COALESCE(tempo_mao_obra, 0)) FROM orcamento_itens WHERE orcamento_id = ?");
                     $stmt_horas_orc->execute([$orc_row['id']]);
-                    $horas_orcamentadas = (float)$stmt_horas_orc->fetchColumn();
+                    $horas_orcamentadas = (float)$stmt_horas_orc->fetchColumn() / 60;   // minutos → horas
                 } catch (Exception $e) {
                     $horas_orcamentadas = 0;
                 }
@@ -378,7 +405,7 @@ if ($obra_selecionada) {
         $stmt_manuais = $pdo->prepare("SELECT d.*, u.nome AS nome_colaborador
                                         FROM obra_despesas d
                                         LEFT JOIN utilizadores u ON d.id_utilizador = u.id
-                                        WHERE d.obra_id = ? AND d.origem = 'Manual'
+                                        WHERE d.obra_id = ? AND d.origem IN ('Manual', 'Compra')
                                         ORDER BY d.data_despesa DESC, d.id DESC");
         $stmt_manuais->execute([$obra_selecionada]);
         $despesas_manuais = $stmt_manuais->fetchAll(PDO::FETCH_ASSOC);
@@ -427,7 +454,8 @@ if ($obra_selecionada) {
         }
 
     } catch (Exception $e) {
-        $mensagem_erro = "Erro ao carregar dados financeiros: " . $e->getMessage();
+        error_log('gestao.php (dados): ' . $e->getMessage());
+        $mensagem_erro = "Não foi possível carregar todos os dados financeiros desta obra.";
     }
 }
 
@@ -471,8 +499,11 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gestão Central - Gestão MAB</title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         * { font-family: system-ui, -apple-system, sans-serif; box-sizing: border-box; }
@@ -482,8 +513,14 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
         .topbar { background-color: #fff; padding: 10px 40px; box-shadow: 0 2px 15px rgba(0,0,0,0.05); display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
         .topbar-left .logo { height: 35px; }
         .topbar-right { display: flex; align-items: center; gap: 20px; }
-        .btn-back { color: #576574; text-decoration: none; font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; transition: color 0.2s; }
-        .btn-back:hover { color: #27ae60; }
+        .btn-voltar { width: 40px; height: 40px; border-radius: 50%; background: #fff; border: 1px solid #e8ecf1; color: #576574; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; font-size: 16px; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.04); flex-shrink: 0; }
+        .btn-voltar:hover { background: #eef2f6; color: #27ae60; transform: translateX(-2px); }
+        .btn-importar-compra { background: #eafaf1; color: #27ae60; border: 1px solid #a9dfbf; padding: 7px 12px; border-radius: 8px; font-size: 13px; font-weight: 700; text-decoration: none; margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-importar-compra:hover { background: #27ae60; color: #fff; }
+        .modal-pw { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 1000; align-items: center; justify-content: center; }
+        .modal-pw.show { display: flex; }
+        .modal-pw .box { background: #fff; border-radius: 12px; padding: 22px; width: 92%; max-width: 400px; }
+        .modal-pw input[type=password] { width: 100%; padding: 11px; border: 1px solid #dcdde1; border-radius: 8px; margin: 12px 0; }
 
         .user-menu { position: relative; }
         .user-btn { background: #fdfdfd; border: 1px solid #f1f2f6; border-radius: 30px; font-size: 14px; font-weight: 600; color: #2c3e50; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 6px 15px 6px 6px; transition: 0.2s; }
@@ -491,7 +528,7 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
         .user-avatar { background: #e74c3c; color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 14px; border: 2px solid #fadbd8; }
 
         .dropdown-content { display: none; position: absolute; right: 0; top: 100%; background: #fff; min-width: 180px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border-radius: 8px; border: 1px solid #f1f2f6; overflow: hidden; margin-top: 5px; z-index: 200; }
-        .user-menu:hover .dropdown-content { display: block; }
+        .user-menu:hover .dropdown-content, .user-menu.aberto .dropdown-content { display: block; }
         .dropdown-content a { color: #576574; padding: 12px 20px; text-decoration: none; display: block; font-size: 14px; }
         .dropdown-content a:hover { background: #fdf2f2; color: #27ae60; }
 
@@ -618,7 +655,7 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
 
         @media (max-width: 768px) {
             .topbar { padding: 10px 15px; }
-            .btn-back span { display: none; }
+            .user-nome { display: none; }
             .page-header { margin-bottom: 15px; padding-bottom: 10px; }
             .page-title { font-size: 18px; }
             .kpi-grid { grid-template-columns: 1fr 1fr; }
@@ -634,11 +671,11 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
     <header class="topbar">
         <div class="topbar-left"><a href="index.php"><img src="mab.png" alt="MAB" class="logo"></a></div>
         <div class="topbar-right">
-            <a href="index.php" class="btn-back" title="Voltar"><i class="fa-solid fa-arrow-left"></i> <span>Voltar</span></a>
+            <a href="index.php" class="btn-voltar" title="Voltar" aria-label="Voltar"><i class="fa-solid fa-arrow-left"></i></a>
             <div class="user-menu">
-                <button class="user-btn">
+                <button type="button" class="user-btn">
                     <div class="user-avatar"><i class="fa-solid fa-user"></i></div>
-                    <?= htmlspecialchars($primeiro_nome) ?>
+                    <span class="user-nome"><?= htmlspecialchars($primeiro_nome) ?></span>
                     <i class="fa-solid fa-caret-down" style="font-size: 12px; color: #95a5a6;"></i>
                 </button>
                 <div class="dropdown-content">
@@ -773,8 +810,11 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
             </div>
 
             <div class="card" id="form_despesa_card">
-                <h2 id="form_despesa_title"><i class="fa-solid fa-plus-circle"></i> Registar Nova Despesa Manual</h2>
-                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?>" class="form-row" id="formDespesaGestao">
+                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:5px;">
+                    <h2 id="form_despesa_title" style="margin:0;"><i class="fa-solid fa-plus-circle"></i> Registar Nova Despesa Manual</h2>
+                    <a href="obra_compras.php?id_obra=<?= (int)$obra_selecionada ?>" class="btn-importar-compra" title="Importar a fatura / encomenda linha a linha, associar aos artigos do orçamento e comparar horas"><i class="fa-solid fa-file-import"></i> Importar fatura / encomenda</a>
+                </div>
+                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?><?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">" class="form-row" id="formDespesaGestao">
                     <input type="hidden" name="add_despesa" id="add_despesa_flag_gestao" value="1">
                     <input type="hidden" name="id_despesa_edit" id="id_despesa_edit_gestao" value="">
 
@@ -843,21 +883,22 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
                                     <tr>
                                         <td><?= date('d/m/Y', strtotime($dm['data_despesa'])) ?></td>
                                         <td><?= htmlspecialchars($dm['tipo_despesa']) ?></td>
-                                        <td><?= htmlspecialchars($dm['descricao']) ?></td>
+                                        <td><?= htmlspecialchars($dm['descricao']) ?><?= ($dm['origem'] ?? '') === 'Compra' ? ' <span style="font-size:10px; font-weight:800; color:#27ae60; background:#eafaf1; padding:2px 6px; border-radius:8px;">IMPORTADA</span>' : '' ?></td>
                                         <td style="color:#16a085; font-weight:600; font-size:13px;"><?= htmlspecialchars($dm['nome_colaborador'] ?? '-') ?></td>
                                         <td class="text-right" style="font-weight:700;"><?= formatNumberToPT($dm['valor']) ?> €</td>
                                         <td class="text-center">
+                                            <?php if (($dm['origem'] ?? '') === 'Compra'): ?>
+                                            <a href="obra_compras.php?id_obra=<?= (int)$obra_selecionada ?>#compra-<?= (int)($dm['id_compra'] ?? 0) ?>" class="btn-icon" title="Compra importada: ver as linhas / anular em Compras da obra"><i class="fa-solid fa-file-import" style="color:#27ae60;"></i></a>
+                                            <?php else: ?>
                                             <div style="display:flex; gap:8px; justify-content:center; align-items:center;">
-                                                <button type="button" class="btn-icon" onclick='editarDespesaGestao(<?= json_encode($dm) ?>)' title="Editar"><i class="fa-solid fa-pen-to-square"></i></button>
-                                                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?>" style="margin:0;" onsubmit="return confirm('Duplicar esta despesa com a data de hoje?');">
+                                                <button type="button" class="btn-icon" onclick='editarDespesaGestao(<?= json_encode($dm, JSON_HEX_APOS | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>)' title="Editar"><i class="fa-solid fa-pen-to-square"></i></button>
+                                                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?><?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">" style="margin:0;" onsubmit="return confirm('Duplicar esta despesa com a data de hoje?');">
                                                     <input type="hidden" name="duplicar_despesa_id" value="<?= $dm['id'] ?>">
                                                     <button type="submit" class="btn-icon" title="Duplicar"><i class="fa-solid fa-copy"></i></button>
                                                 </form>
-                                                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?>" style="margin:0;" onsubmit="return confirm('Apagar esta despesa definitivamente?');">
-                                                    <input type="hidden" name="apagar_despesa_id" value="<?= $dm['id'] ?>">
-                                                    <button type="submit" class="btn-icon btn-del" title="Apagar"><i class="fa-solid fa-trash-can"></i></button>
-                                                </form>
+                                                <button type="button" class="btn-icon btn-del" title="Apagar" onclick="abrirApagarDespesa(<?= (int)$dm['id'] ?>)"><i class="fa-solid fa-trash-can"></i></button>
                                             </div>
+                                            <?php endif; ?>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -1224,6 +1265,22 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
             document.getElementById('btn_cancel_edit_gestao').style.display = 'none';
         }
 
+        // Apagar despesa manual: pede a password de segurança (verificada no servidor)
+        function abrirApagarDespesa(id) {
+            document.getElementById('apagar_despesa_id_input').value = id;
+            const m = document.getElementById('modalApagarDespesa');
+            m.querySelector('input[type=password]').value = '';
+            m.classList.add('show');
+            m.querySelector('input[type=password]').focus();
+        }
+
+        // Menu do utilizador (toque em ecrãs táteis)
+        (function () {
+            const menu = document.querySelector('.user-menu'); if (!menu) return;
+            menu.querySelector('.user-btn').addEventListener('click', e => { e.stopPropagation(); menu.classList.toggle('aberto'); });
+            document.addEventListener('click', () => menu.classList.remove('aberto'));
+        })();
+
         function toggleGroup(id) {
             const details = document.getElementById('details-' + id);
             const icon = document.getElementById('icon-' + id).querySelector('i');
@@ -1237,5 +1294,20 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
             }
         }
     </script>
+
+    <div class="modal-pw" id="modalApagarDespesa">
+        <div class="box">
+            <h3 style="margin-top:0; color:#c0392b;"><i class="fa-solid fa-trash-can"></i> Apagar despesa</h3>
+            <p style="color:#576574; margin:0;">A despesa sai do resultado da obra (fica uma cópia no arquivo). Introduza a password de segurança:</p>
+            <form method="POST" action="gestao.php?id_obra=<?= (int)$obra_selecionada ?>"><?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
+                <input type="hidden" name="apagar_despesa_id" id="apagar_despesa_id_input">
+                <input type="password" name="pass_seguranca" placeholder="Password de segurança" required autocomplete="off">
+                <div style="display:flex; gap:10px;">
+                    <button type="button" class="btn-secondary" style="flex:1; justify-content:center; display:inline-flex;" onclick="document.getElementById('modalApagarDespesa').classList.remove('show')">Cancelar</button>
+                    <button type="submit" class="btn-add-despesa" style="flex:1; justify-content:center; background:#c0392b;">Apagar</button>
+                </div>
+            </form>
+        </div>
+    </div>
 </body>
 </html>

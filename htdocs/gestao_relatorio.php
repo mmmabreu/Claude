@@ -251,7 +251,7 @@ try {
     $stmt_manuais = $pdo->prepare("SELECT d.*, u.nome AS nome_colaborador
                                     FROM obra_despesas d
                                     LEFT JOIN utilizadores u ON d.id_utilizador = u.id
-                                    WHERE d.obra_id = ? AND d.origem = 'Manual'
+                                    WHERE d.obra_id = ? AND d.origem IN ('Manual', 'Compra')
                                     ORDER BY d.data_despesa DESC, d.id DESC");
     $stmt_manuais->execute([$obra_selecionada]);
     $despesas_manuais = $stmt_manuais->fetchAll(PDO::FETCH_ASSOC);
