@@ -73,7 +73,6 @@ try {
         foreach ($lin_prev as $n => $lp) {
             $desig_p = (string)($lp['designacao'] ?? ''); $art_p = (string)($lp['artigo'] ?? ''); $q_str_p = (string)($lp['quantidade'] ?? '');
             if (trim($desig_p) === '' && trim($art_p) === '' && trim($q_str_p) === '') continue;
-            if (!empty($lp['excluida'])) continue;   // linha excluída: só aparece em «Não inclui»
             $q_p = limparNumero($q_str_p); $pc_p = limparNumero($lp['preco_unitario_custo'] ?? '0');
             $pv_p = limparNumero($lp['preco_unitario_venda'] ?? '0'); $tmo_p = limparNumero($lp['tempo_mao_obra'] ?? '0');
             $itens_raw[] = [
@@ -82,12 +81,13 @@ try {
                 'artigo' => $art_p, 'designacao' => $desig_p, 'unidade' => (string)($lp['unidade'] ?? ''),
                 'quantidade' => $q_p, 'preco_unitario_custo' => $pc_p, 'tempo_mao_obra' => $tmo_p,
                 'valor_custo' => round($q_p * $pc_p, 2), 'preco_unitario_venda' => $pv_p, 'valor_venda' => round($q_p * $pv_p, 2),
+                'excluida' => !empty($lp['excluida']) ? 1 : 0,
             ];
         }
     } else {
         $stmt_itens = $pdo->prepare("SELECT * FROM orcamento_itens WHERE orcamento_id = ? ORDER BY id ASC");
         $stmt_itens->execute([$id]);
-        $itens_raw = array_values(array_filter($stmt_itens->fetchAll(PDO::FETCH_ASSOC), fn($l) => empty($l['excluida'])));   // excluídas: só aparecem em «Não inclui»
+        $itens_raw = $stmt_itens->fetchAll(PDO::FETCH_ASSOC);   // as excluídas aparecem assinaladas e não contam nos totais
     }
 
     // Separar por canais Interno vs Comercial
@@ -105,7 +105,9 @@ try {
     if ($is_gestao || $is_capitulo_interno) {
         $itens = $itens_interno;
     } else {
-        $itens = !empty($itens_comercial) ? $itens_comercial : $itens_interno;
+        $tem_com_valido = false;
+        foreach ($itens_comercial as $it_c) if (empty($it_c['excluida'])) { $tem_com_valido = true; break; }
+        $itens = $tem_com_valido ? $itens_comercial : $itens_interno;
     }
 
     // Pré-visualização: cabeçalho e totais com os valores do formulário
@@ -135,6 +137,7 @@ try {
         $taxa_p = (float)($_POST['taxa_iva'] ?? ($orc['taxa_iva'] ?? 23));
         $tem_com_p = false; $sv_i = 0; $sv_c = 0; $sc_i = 0;
         foreach ($itens_raw as $it_p) {
+            if (!empty($it_p['excluida'])) continue;   // linha excluída não conta
             if ($it_p['tipo_linha'] === 'Comercial') { if (trim($it_p['designacao']) !== '') $tem_com_p = true; $sv_c += $it_p['valor_venda']; }
             else { $sv_i += $it_p['valor_venda']; $sc_i += $it_p['valor_custo']; }
         }
@@ -247,6 +250,7 @@ if ($is_capitulo) {
     };
     $pilha = [];   // títulos abertos, do mais geral para o mais fundo: [id, artigo]
     foreach ($itens as $it) {
+        if (!empty($it['excluida'])) continue;   // linha excluída não soma no capítulo
         if ($eTitulo($it)) {
             // fecha os títulos que não são "pais" deste
             while ($pilha && !$ePrefixo(end($pilha)['art'], $it['artigo'] ?? '')) array_pop($pilha);
@@ -424,6 +428,34 @@ foreach ($itens as $item) {
     $pdf->SetFont('Arial', '', ($is_gestao) ? 7 : 8);
     $h = $linha_altura_base * max(1, $pdf->NbLines($w[1], $desig));
 
+    // LINHA EXCLUÍDA (não é da especialidade): aparece com sombreado vermelho, «EXCLUÍDO» no lugar do valor
+    // e a indicação por baixo. Não conta em nenhum total; o texto está também em «A proposta não inclui».
+    if (!empty($item['excluida'])) {
+        $h_ex = $h + 4;
+        if ($pdf->GetY() + $h_ex > 270) { $pdf->AddPage(); $draw_header(); $pdf->SetFont('Arial', '', ($is_gestao) ? 7 : 8); }
+        $x = $pdf->GetX(); $y = $pdf->GetY();
+        $pdf->SetFillColor(253, 226, 226); $pdf->Rect(10, $y, 190, $h_ex, 'F');
+        $pdf->SetDrawColor(220, 38, 38); $pdf->SetLineWidth(0.6); $pdf->Line(10, $y, 10, $y + $h_ex); $pdf->SetLineWidth(0.2);
+        $pdf->SetTextColor(153, 27, 27);
+        $pdf->SetXY($x, $y); $pdf->Cell($w[0], $linha_altura_base, $artigo, 0, 0, 'L');
+        $pdf->SetXY($x + $w[0], $y); $pdf->MultiCell($w[1], $linha_altura_base, $desig, 0, 'J');
+        $curX = $x + $w[0] + $w[1];
+        if ($qtd > 0) {
+            $pdf->SetXY($curX, $y); $pdf->Cell($w[2], $linha_altura_base, pt(trim((string)$item['unidade'])), 0, 0, 'C');
+            $pdf->SetXY($curX + $w[2], $y); $pdf->Cell($w[3], $linha_altura_base, number_format($qtd, 2, ',', '.'), 0, 0, 'C');
+        }
+        $larg_val = array_sum(array_slice($w, 4));
+        if ($larg_val > 0) {
+            $pdf->SetFont('Arial', 'B', 8);
+            $pdf->SetXY($curX + $w[2] + $w[3], $y); $pdf->Cell($larg_val, $linha_altura_base, pt('EXCLUÍDO'), 0, 0, 'R');
+        }
+        $pdf->SetFont('Arial', 'I', 7);
+        $pdf->SetXY($x + $w[0], $y + $h); $pdf->Cell(190 - $w[0], 4, pt('Excluído desta proposta: não faz parte do fornecimento (ver «A proposta não inclui»).'), 0, 0, 'L');
+        $pdf->SetTextColor(0, 0, 0); $pdf->SetFont('Arial', '', ($is_gestao) ? 7 : 8);
+        $pdf->SetY($y + $h_ex); $pdf->SetDrawColor(220, 220, 220); $pdf->Line(10, $pdf->GetY(), 200, $pdf->GetY()); $pdf->SetY($pdf->GetY() + 1);
+        continue;
+    }
+
     // Resumo Comercial tal como está no formulário: cada coluna mostra exatamente o que foi preenchido
     if ($is_fiel) {
         if ($pdf->GetY() + $h > 270) { $pdf->AddPage(); $draw_header(); $pdf->SetFont('Arial', '', 8); }
@@ -492,7 +524,7 @@ $pdf->SetFont('Arial', 'B', 9); $taxa_iva = floatval($orc['taxa_iva']);
 // (se o Resumo Comercial tiver outro valor, o documento bate certo com os capítulos impressos)
 if ($is_capitulo_interno) {
     $liq_int = 0.0;
-    foreach ($itens_interno as $it_t) { if (floatval($it_t['quantidade']) > 0) $liq_int += round(floatval($it_t['valor_venda']), 2); }
+    foreach ($itens_interno as $it_t) { if (empty($it_t['excluida']) && floatval($it_t['quantidade']) > 0) $liq_int += round(floatval($it_t['valor_venda']), 2); }
     $liq_int = round($liq_int, 2);
     if (abs($liq_int - floatval($orc['valor_total_liquido'])) >= 0.01) {
         $orc['valor_total_liquido'] = $liq_int;
@@ -508,6 +540,7 @@ if (!$is_limpa) {
         // Total de horas de mão de obra (tempo por unidade, em minutos, × quantidade — igual ao formulário)
         $min_mo = 0;
         foreach ($itens_interno as $it_mo) {
+            if (!empty($it_mo['excluida'])) continue;
             $q_mo = (float)($it_mo['quantidade'] ?? 0); $t_mo = (float)($it_mo['tempo_mao_obra'] ?? 0);
             if ($q_mo > 0 && $t_mo > 0) $min_mo += $q_mo * $t_mo;
         }
