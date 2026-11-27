@@ -21,15 +21,15 @@ if (!function_exists('totalFoiAcertado')) {
     }
 }
 
-// FORÇAR EXIBIÇÃO DE ERROS BÁSICOS
-ini_set('display_errors', 1);
-ini_set('display_startup_errors', 1);
-error_reporting(E_ALL);
+// Os erros não são mostrados no ecrã (ficam no registo de erros do servidor)
+ini_set('display_errors', 0);
 
 try {
     session_start();
     require_once 'db.php';
+    require_once 'functions.php';
 
+    // REGRA DE OURO 1: Validação de sessão
     if (!isset($_SESSION['user_id'])) {
         header("Location: index.php");
         exit;
@@ -44,6 +44,12 @@ try {
     $meus_acessos = $stmt_perm->fetchAll(PDO::FETCH_COLUMN);
     $is_admin = ($perfil_utilizador === 'admin' || $perfil_utilizador === 'administrativo');
 
+    // REGRA DE OURO 2: Acesso restrito pela matriz de permissões (os autos fazem parte do módulo Obras)
+    if (!$is_admin && !in_array('obras', $meus_acessos)) {
+        header("Location: index.php?erro=sem_permissao");
+        exit;
+    }
+
     // REGRA DE OURO: Obter apenas o primeiro nome
     $nome_completo = $_SESSION['nome'] ?? 'Utilizador';
     $primeiro_nome = explode(' ', trim($nome_completo))[0];
@@ -55,6 +61,31 @@ try {
     if (!$pass_seguranca_sistema) {
         $pass_seguranca_sistema = 'mab2026';
     }
+
+    // --- EDITAR AUTO ANTIGO: a password é verificada AQUI, no servidor ---
+    // (antes era comparada no browser e a password ficava escrita no código da página, à vista de todos)
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['acao'] ?? '') === 'editar_antigo') {
+        $id_ed = filter_input(INPUT_POST, 'id', FILTER_VALIDATE_INT);
+        if (!validar_csrf_token($_POST['csrf_token'] ?? '')) {
+            header("Location: autos.php?erro=sessao"); exit;
+        }
+        if (!$id_ed || !hash_equals((string)$pass_seguranca_sistema, (string)($_POST['pass_seguranca'] ?? ''))) {
+            header("Location: autos.php?erro=password"); exit;
+        }
+        header("Location: auto_form.php?id=" . $id_ed); exit;
+    }
+
+    // Mensagens depois de apagar / da verificação da password
+    $msg_topo = ''; $msg_tipo = 'erro';
+    $erros_txt = [
+        'password'      => 'Password de segurança incorreta. Nada foi alterado.',
+        'sessao'        => 'A sessão expirou ou o pedido não é válido. Atualize a página e tente de novo.',
+        'sem_permissao' => 'Só o administrador pode apagar autos.',
+        'nao_ultimo'    => 'Só se pode apagar o último auto de cada obra.',
+        'db'            => 'Não foi possível apagar o auto. Nada foi alterado.',
+    ];
+    if (isset($_GET['sucesso'])) { $msg_topo = 'Auto apagado. Fica guardada uma cópia no arquivo.'; $msg_tipo = 'sucesso'; }
+    elseif (isset($_GET['erro'], $erros_txt[$_GET['erro']])) { $msg_topo = $erros_txt[$_GET['erro']]; }
 
     // --- EXPORTAR EXCEL (MAPA DA OBRA RESUMO) ---
     if (isset($_GET['exportar_excel'])) {
@@ -206,11 +237,10 @@ try {
         return $b <=> $a;
     });
 } catch (Throwable $e) {
+    error_log('autos.php: ' . $e->getMessage() . ' em ' . $e->getFile() . ':' . $e->getLine());
     die("<div style='margin: 50px auto; max-width: 800px; padding: 25px; background: #fff3f3; color: #d63031; border: 2px solid #ff7675; border-radius: 8px; font-family: sans-serif; box-shadow: 0 4px 15px rgba(0,0,0,0.1);'>
-            <h2 style='margin-top:0; border-bottom: 1px solid #ff7675; padding-bottom: 10px;'>⚠️ Erro Fatal Detetado</h2>
-            <p style='font-size: 16px;'><strong>Mensagem:</strong> " . htmlspecialchars($e->getMessage()) . "</p>
-            <p><strong>Ficheiro:</strong> " . $e->getFile() . "</p>
-            <p><strong>Linha:</strong> " . $e->getLine() . "</p>
+            <h2 style='margin-top:0; border-bottom: 1px solid #ff7675; padding-bottom: 10px;'>⚠️ Não foi possível abrir os autos</h2>
+            <p style='font-size: 16px;'>Tente de novo. Se o erro continuar, avise o administrador.</p>
          </div>");
 }
 ?>
@@ -218,8 +248,11 @@ try {
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Autos de Medição - Gestão MAB</title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; background-color: #f7f9fc; margin: 0; color: #333; font-size: 14px; padding-bottom:50px;}
@@ -346,6 +379,9 @@ try {
     </header>
 
     <div class="container">
+        <?php if ($msg_topo): ?>
+            <div style="padding:13px 15px; border-radius:8px; margin-bottom:18px; font-weight:600; <?= $msg_tipo === 'sucesso' ? 'background:#e8f5e9; color:#1e8449; border:1px solid #c8e6c9;' : 'background:#fdeded; color:#c0392b; border:1px solid #fadbd8;' ?>"><?= htmlspecialchars($msg_topo) ?></div>
+        <?php endif; ?>
         <div class="page-header">
             <h1 class="page-title">Autos de Medição</h1>
             <a href="auto_form.php" class="btn-primary" style="background:#34495e;"><i class="fa-solid fa-file-circle-plus"></i> Auto Independente</a>
@@ -499,11 +535,16 @@ try {
         <div class="modal-content">
             <h3 id="modal_titulo" style="color:#b32a2a;">Segurança</h3>
             <p id="modal_texto">Introduza a password de segurança:</p>
-            <input type="password" id="input_pass_seguranca" placeholder="Password">
-            <div style="display:flex; gap:10px;">
-                <button onclick="fecharModal()" style="flex:1; background:#eee; border:none; padding:10px; border-radius:8px; cursor:pointer;">Cancelar</button>
-                <button id="btn_confirmar_modal" class="btn-primary" style="flex:1; justify-content:center;">Confirmar</button>
-            </div>
+            <form method="POST" id="form_seguranca" action="autos.php">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
+                <input type="hidden" name="acao" id="seg_acao" value="">
+                <input type="hidden" name="id" id="seg_id" value="">
+                <input type="password" name="pass_seguranca" id="input_pass_seguranca" placeholder="Password" required autocomplete="off">
+                <div style="display:flex; gap:10px;">
+                    <button type="button" onclick="fecharModal()" style="flex:1; background:#eee; border:none; padding:10px; border-radius:8px; cursor:pointer;">Cancelar</button>
+                    <button type="submit" id="btn_confirmar_modal" class="btn-primary" style="flex:1; justify-content:center;">Confirmar</button>
+                </div>
+            </form>
         </div>
     </div>
 
@@ -523,17 +564,21 @@ try {
     </div>
 
     <script>
-        const PASS_SISTEMA = '<?= htmlspecialchars($pass_seguranca_sistema ?? '') ?>';
         let idAlvo = null;
         let acaoAlvo = '';
 
         // FUNÇÕES PARA O MODAL DE SEGURANÇA
         function abrirModal(titulo, texto, id, acao) {
             idAlvo = id; acaoAlvo = acao;
+            // Editar auto antigo → verificado em autos.php; apagar → verificado em auto_apagar.php
+            document.getElementById('form_seguranca').action = (acao === 'apagar') ? 'auto_apagar.php' : 'autos.php';
+            document.getElementById('seg_acao').value = (acao === 'apagar') ? 'apagar' : 'editar_antigo';
+            document.getElementById('seg_id').value = id;
             document.getElementById('modal_titulo').innerText = titulo;
             document.getElementById('modal_texto').innerText = texto;
             document.getElementById('input_pass_seguranca').value = '';
             document.getElementById('modalSeguranca').classList.add('show');
+            document.getElementById('input_pass_seguranca').focus();
         }
 
         function fecharModal() {
@@ -548,18 +593,6 @@ try {
             abrirModal('Apagar Auto', 'Eliminar o último registo? Requer password:', id, 'apagar');
         }
 
-        document.getElementById('btn_confirmar_modal').onclick = function() {
-            const pass = document.getElementById('input_pass_seguranca').value;
-            if (pass === PASS_SISTEMA) {
-                if (acaoAlvo === 'editar') {
-                    window.location.href = 'auto_form.php?id=' + idAlvo;
-                } else if (acaoAlvo === 'apagar') {
-                    window.location.href = 'auto_apagar.php?id=' + idAlvo;
-                }
-            } else {
-                alert('Password incorreta.');
-            }
-        };
 
         // FUNÇÕES PARA O MODAL DE IMPORTAÇÃO (1º AUTO)
         let obraIdParaImportar = null;
