@@ -141,18 +141,52 @@ if (isset($_GET['ajax_nova_ficha'])) {
         $marca  = mb_substr(trim((string)($_POST['marca'] ?? '')), 0, 100);
         $modelo = mb_substr(trim((string)($_POST['modelo'] ?? '')), 0, 150);
         $ref    = mb_substr(trim((string)($_POST['referencia_fab'] ?? '')), 0, 100);
-        if ($marca === '' || $modelo === '') throw new Exception('Indica a marca e o modelo da ficha.');
-        if (empty($_FILES['ficheiro']['name'])) throw new Exception('Escolhe o ficheiro da ficha técnica.');
-        [$ficheiro, $nome_or, $tam] = ft_guardar_upload($_FILES['ficheiro'], $marca, $modelo);
-        $pdo->prepare("INSERT INTO fichas_tecnicas (marca, modelo, referencia, descricao, ficheiro, nome_original, tamanho, versoes_json, ativo, carregado_em, carregado_por, atualizado_em)
-                       VALUES (?,?,?,'',?,?,?,'[]',1,NOW(),?,NOW())")->execute([$marca, $modelo, $ref, $ficheiro, $nome_or, $tam, $_SESSION['nome'] ?? '']);
+        if ($marca === '' || $modelo === '') throw new Exception('Indica a marca e o modelo do produto.');
+        $tem_f = !empty($_FILES['ficheiro']['name']); $tem_c = !empty($_FILES['certificado']['name']);
+        if (!$tem_f && !$tem_c) throw new Exception('Escolhe a ficha técnica e/ou o certificado de conformidade.');
+        [$ficheiro, $nome_or, $tam] = $tem_f ? ft_guardar_upload($_FILES['ficheiro'], $marca, $modelo) : ['', '', 0];
+        [$c_fich, $c_nome, $c_tam] = $tem_c ? ft_guardar_upload($_FILES['certificado'], $marca, $modelo, 'cert_') : ['', '', 0];
+        $pdo->prepare("INSERT INTO fichas_tecnicas (marca, modelo, referencia, descricao, ficheiro, nome_original, tamanho, versoes_json, cert_ficheiro, cert_nome_original, cert_tamanho, cert_versoes_json, ativo, carregado_em, carregado_por, atualizado_em)
+                       VALUES (?,?,?,'',?,?,?,'[]',?,?,?,'[]',1,NOW(),?,NOW())")->execute([$marca, $modelo, $ref, $ficheiro, $nome_or, $tam, $c_fich, $c_nome, $c_tam, $_SESSION['nome'] ?? '']);
         $novo = (int)$pdo->lastInsertId();
-        registrarLog($pdo, "Carregou ficha técnica ($marca $modelo) a partir da Tabela de Preços", "Fichas Técnicas");
+        registrarLog($pdo, "Carregou produto ($marca $modelo)" . ($tem_f ? ' - ficha' : '') . ($tem_c ? ' - certificado' : '') . " a partir da Tabela de Preços", "Fichas Técnicas");
         ob_end_clean();
-        echo json_encode(['status' => 'success', 'ficha' => ['id' => $novo, 'marca' => $marca, 'modelo' => $modelo, 'referencia' => $ref, 'url' => ft_url($ficheiro)]]);
+        echo json_encode(['status' => 'success', 'ficha' => ['id' => $novo, 'marca' => $marca, 'modelo' => $modelo, 'referencia' => $ref,
+                                                            'url' => $ficheiro !== '' ? ft_url($ficheiro) : '', 'cert_url' => $c_fich !== '' ? ft_url($c_fich) : '']]);
     } catch (Throwable $e) {
         ob_end_clean();
         echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
+    }
+    exit;
+}
+
+// =========================================================================
+// ENDPOINT AJAX: CARREGAR / SUBSTITUIR O CERTIFICADO DE CONFORMIDADE DE UM PRODUTO DA BIBLIOTECA
+// =========================================================================
+if (isset($_GET['ajax_certificado'])) {
+    ob_start();
+    header('Content-Type: application/json');
+    try {
+        if (!$tem_fichas) throw new Exception('Falta o ficheiro fichas_tecnicas_lib.php no servidor.');
+        $id_f = filter_input(INPUT_POST, 'id_ficha', FILTER_VALIDATE_INT);
+        $st = $pdo->prepare("SELECT * FROM fichas_tecnicas WHERE id = ?"); $st->execute([$id_f ?: 0]);
+        $atual = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$atual) throw new Exception('Produto não encontrado na biblioteca.');
+        if (empty($_FILES['certificado']['name'])) throw new Exception('Escolhe o ficheiro do certificado.');
+        [$c_fich, $c_nome, $c_tam] = ft_guardar_upload($_FILES['certificado'], $atual['marca'], $atual['modelo'], 'cert_');
+        // Nunca perder dados: o certificado anterior fica no histórico (o ficheiro não é apagado)
+        $versoes = json_decode((string)($atual['cert_versoes_json'] ?? ''), true) ?: [];
+        if ($atual['cert_ficheiro'] !== '') $versoes[] = ['ficheiro' => $atual['cert_ficheiro'], 'nome_original' => $atual['cert_nome_original'], 'tamanho' => (int)$atual['cert_tamanho'],
+                                                          'numero' => $atual['cert_numero'] ?? '', 'validade' => $atual['cert_validade'] ?? null, 'ate' => date('Y-m-d H:i:s')];
+        $pdo->prepare("UPDATE fichas_tecnicas SET cert_ficheiro = ?, cert_nome_original = ?, cert_tamanho = ?, cert_versoes_json = ?, atualizado_em = NOW() WHERE id = ?")
+            ->execute([$c_fich, $c_nome, $c_tam, json_encode($versoes, JSON_UNESCAPED_UNICODE), $atual['id']]);
+        registrarLog($pdo, "Carregou certificado de conformidade (" . $atual['marca'] . ' ' . $atual['modelo'] . ") a partir da Tabela de Preços", "Fichas Técnicas");
+        ob_end_clean();
+        echo json_encode(['status' => 'success', 'cert_url' => ft_url($c_fich), 'substituido' => $atual['cert_ficheiro'] !== '']);
+    } catch (Throwable $e) {
+        ob_end_clean();
+        if ($e instanceof PDOException) { error_log('tabela_precos.php (certificado): ' . $e->getMessage()); echo json_encode(['status' => 'error', 'message' => 'Não foi possível gravar o certificado.']); }
+        else echo json_encode(['status' => 'error', 'message' => $e->getMessage()]);
     }
     exit;
 }
@@ -303,9 +337,10 @@ $fichas_bib = [];
 $marcas_lista = [];
 if ($tem_fichas) {
     try {
-        foreach ($pdo->query("SELECT id, marca, modelo, referencia, ficheiro, ativo FROM fichas_tecnicas ORDER BY marca ASC, modelo ASC")->fetchAll(PDO::FETCH_ASSOC) as $f) {
+        foreach ($pdo->query("SELECT id, marca, modelo, referencia, ficheiro, cert_ficheiro, ativo FROM fichas_tecnicas ORDER BY marca ASC, modelo ASC")->fetchAll(PDO::FETCH_ASSOC) as $f) {
             $fichas_bib[(int)$f['id']] = ['id' => (int)$f['id'], 'marca' => $f['marca'], 'modelo' => $f['modelo'], 'referencia' => $f['referencia'],
-                                         'url' => ft_url($f['ficheiro']), 'ativo' => (int)$f['ativo']];
+                                         'url' => $f['ficheiro'] !== '' ? ft_url($f['ficheiro']) : '',
+                                         'cert_url' => (string)$f['cert_ficheiro'] !== '' ? ft_url($f['cert_ficheiro']) : '', 'ativo' => (int)$f['ativo']];
             if ($f['marca'] !== '') $marcas_lista[$f['marca']] = 1;
         }
     } catch (Exception $e) {}
@@ -433,6 +468,12 @@ natcasesort($marcas_lista);
         .nova-ficha .linha2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
         .nova-ficha input { padding: 9px 10px; border: 1px solid #dcdde1; border-radius: 8px; font-size: 13px; width: 100%; font-family: inherit; }
         .ficha-info { font-size: 11px; color: #7f8c8d; margin-top: 4px; min-height: 14px; }
+        .ficha-link.cert-link { color: #2471a3; }
+        .cert-linha { display: none; margin-top: 8px; padding: 9px 11px; border: 1px solid #d6eaf8; background: #f8fbfe; border-radius: 8px; font-size: 12px; color: #2c3e50; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .cert-linha a.ver { color: #2471a3; font-weight: 700; text-decoration: none; }
+        .cert-linha .sem { color: #95a5a6; font-style: italic; }
+        .btn-mini.azul { background: #eaf2fb; border-color: #aed6f1; color: #1f618d; }
+        .nova-ficha label.lbl-doc { display: block; font-size: 11px; font-weight: 700; color: #576574; text-transform: uppercase; margin: 8px 0 4px; }
         .modal-content { max-height: 92vh; overflow-y: auto; }
 
         /* TOAST DE SUCESSO AJAX */
@@ -576,8 +617,9 @@ natcasesort($marcas_lista);
                                     <td class="td-marca"><?php
                                         $f_art = $fichas_bib[(int)($art['id_ficha_tecnica'] ?? 0)] ?? null;
                                         if (!empty($art['marca'])) echo '<span class="marca-tag">' . htmlspecialchars($art['marca'], ENT_QUOTES, 'UTF-8') . '</span>';
-                                        if ($f_art) echo '<a class="ficha-link" href="' . htmlspecialchars($f_art['url'], ENT_QUOTES, 'UTF-8') . '" target="_blank" title="Ficha técnica: ' . htmlspecialchars($f_art['marca'] . ' ' . $f_art['modelo'], ENT_QUOTES, 'UTF-8') . '"><i class="fa-solid fa-file-pdf"></i></a>';
+                                        if ($f_art && $f_art['url'] !== '') echo '<a class="ficha-link" href="' . htmlspecialchars($f_art['url'], ENT_QUOTES, 'UTF-8') . '" target="_blank" title="Ficha técnica: ' . htmlspecialchars($f_art['marca'] . ' ' . $f_art['modelo'], ENT_QUOTES, 'UTF-8') . '"><i class="fa-solid fa-file-pdf"></i></a>';
                                         elseif ($tem_fichas) echo '<span class="sem-ficha" title="Sem ficha técnica"><i class="fa-regular fa-file"></i></span>';
+                                        if ($f_art && $f_art['cert_url'] !== '') echo '<a class="ficha-link cert-link" href="' . htmlspecialchars($f_art['cert_url'], ENT_QUOTES, 'UTF-8') . '" target="_blank" title="Certificado de conformidade: ' . htmlspecialchars($f_art['marca'] . ' ' . $f_art['modelo'], ENT_QUOTES, 'UTF-8') . '"><i class="fa-solid fa-certificate"></i></a>';
                                     ?></td>
                                     <td class="text-center"><?= htmlspecialchars($art['unidade'], ENT_QUOTES, 'UTF-8') ?></td>
                                     <td class="text-right" style="white-space: nowrap;"><?= number_format($custo_base, 2, ',', ' ') ?> €</td>
@@ -659,25 +701,35 @@ natcasesort($marcas_lista);
 
                     <?php if ($tem_fichas): ?>
                     <div class="form-group full">
-                        <label>Ficha Técnica</label>
+                        <label>Ficha Técnica / Certificado de conformidade</label>
                         <input type="hidden" name="id_ficha_tecnica" id="form_id_ficha" value="">
                         <div class="ficha-linha">
                             <input type="text" id="form_ficha_txt" list="dl_fichas_tp" placeholder="Escolher da biblioteca (escreve a marca ou o modelo)…" oninput="fichaEscrita(this)" autocomplete="off">
                             <a href="#" target="_blank" class="btn-mini" id="btnVerFicha" style="display:none;" title="Abrir a ficha"><i class="fa-solid fa-file-pdf" style="color:#c0392b;"></i></a>
-                            <button type="button" class="btn-mini verde" onclick="toggleNovaFicha()" title="Carregar uma ficha nova para a biblioteca"><i class="fa-solid fa-cloud-arrow-up"></i> Nova</button>
+                            <button type="button" class="btn-mini verde" onclick="toggleNovaFicha()" title="Carregar um produto novo (ficha técnica e/ou certificado) para a biblioteca"><i class="fa-solid fa-cloud-arrow-up"></i> Nova</button>
                         </div>
                         <div class="ficha-info" id="fichaInfo"></div>
+                        <!-- Certificado de conformidade do produto escolhido -->
+                        <div class="cert-linha" id="certLinha">
+                            <i class="fa-solid fa-certificate" style="color:#2471a3;"></i>
+                            <span id="certEstado"></span>
+                            <input type="file" id="cert_ficheiro" accept="application/pdf,.pdf,image/jpeg,image/png" style="display:none;" onchange="enviarCertificado(this)">
+                            <button type="button" class="btn-mini azul" id="btnCert" onclick="document.getElementById('cert_ficheiro').click()" style="margin-left:auto;"><i class="fa-solid fa-cloud-arrow-up"></i> <span>Carregar certificado</span></button>
+                        </div>
                         <div class="nova-ficha" id="boxNovaFicha">
                             <div class="linha2">
                                 <input type="text" id="nf_modelo" maxlength="150" placeholder="Modelo (ex.: Niloé Step tomada Schuko)">
                                 <input type="text" id="nf_ref" maxlength="100" placeholder="Referência do fabricante (opcional)">
                             </div>
+                            <label class="lbl-doc">Ficha técnica (opcional)</label>
                             <input type="file" id="nf_ficheiro" accept="application/pdf,.pdf,image/jpeg,image/png">
+                            <label class="lbl-doc">Certificado de conformidade (opcional)</label>
+                            <input type="file" id="nf_certificado" accept="application/pdf,.pdf,image/jpeg,image/png">
                             <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px;">
                                 <button type="button" class="btn-mini" onclick="toggleNovaFicha(false)">Cancelar</button>
                                 <button type="button" class="btn-mini verde" id="btnEnviarFicha" onclick="enviarNovaFicha()"><i class="fa-solid fa-cloud-arrow-up"></i> Carregar e ligar a este artigo</button>
                             </div>
-                            <div class="ficha-info">A marca é a do campo «Marca» acima. A ficha fica na biblioteca e pode ser usada noutros artigos.</div>
+                            <div class="ficha-info">A marca é a do campo «Marca» acima. Carregue a ficha técnica e/ou o certificado (pelo menos um). Ficam na biblioteca e podem ser usados noutros artigos.</div>
                         </div>
                     </div>
                     <?php endif; ?>
@@ -836,8 +888,40 @@ natcasesort($marcas_lista);
         }
         function mostrarFicha(f) {
             const btn = document.getElementById('btnVerFicha'), info = document.getElementById('fichaInfo');
-            if (f) { btn.href = f.url; btn.style.display = ''; info.innerHTML = '<i class="fa-solid fa-link" style="color:#16a085;"></i> Ligada à ficha da biblioteca' + (f.ativo ? '' : ' (arquivada)') + '.'; }
+            if (f) {
+                if (f.url) { btn.href = f.url; btn.style.display = ''; } else btn.style.display = 'none';
+                info.innerHTML = '<i class="fa-solid fa-link" style="color:#16a085;"></i> Ligado ao produto da biblioteca' + (f.ativo ? '' : ' (arquivado)') + (f.url ? '' : ' (sem ficha técnica)') + '.';
+            }
             else { btn.style.display = 'none'; info.textContent = document.getElementById('form_ficha_txt').value.trim() ? 'Não está na biblioteca — escolhe uma opção da lista ou carrega uma nova.' : ''; }
+            mostrarCertificado(f);
+        }
+        // Certificado de conformidade do produto ligado: abrir, carregar ou substituir
+        function mostrarCertificado(f) {
+            const box = document.getElementById('certLinha'); if (!box) return;
+            box.style.display = f ? 'flex' : 'none';
+            if (!f) return;
+            document.getElementById('certEstado').innerHTML = f.cert_url
+                ? '<a class="ver" href="' + f.cert_url.replace(/"/g, '&quot;') + '" target="_blank">Certificado de conformidade</a>'
+                : '<span class="sem">Este produto ainda não tem certificado de conformidade.</span>';
+            document.querySelector('#btnCert span').textContent = f.cert_url ? 'Substituir' : 'Carregar certificado';
+        }
+        async function enviarCertificado(inp) {
+            const fich = inp.files[0]; inp.value = '';
+            const id = parseInt(document.getElementById('form_id_ficha').value || 0, 10);
+            const f = fichasBib.find(x => x.id === id);
+            if (!fich || !f) return;
+            if (fich.size > 10 * 1024 * 1024) { alert('O ficheiro tem mais de 10 MB.'); return; }
+            if (f.cert_url && !confirm('Substituir o certificado deste produto? O atual fica guardado no histórico.')) return;
+            const fd = new FormData(); fd.append('id_ficha', id); fd.append('certificado', fich);
+            const btn = document.getElementById('btnCert'); btn.disabled = true;
+            try {
+                const json = await pedirJSON('?ajax_certificado=1', fd);
+                if (json.status !== 'success') throw new Error(json.message || 'Erro ao carregar.');
+                f.cert_url = json.cert_url;
+                mostrarCertificado(f);
+                mostrarToast(json.substituido ? 'Certificado substituído (o anterior ficou no histórico).' : 'Certificado carregado.');
+            } catch (e) { alert(e.message); }
+            finally { btn.disabled = false; }
         }
         function fichaEscrita(inp) {
             const f = mapaFichas[inp.value.trim().toLowerCase()];
@@ -867,19 +951,22 @@ natcasesort($marcas_lista);
                 if (!mod.value) mod.value = document.getElementById('form_descricao').value.substring(0, 150);
                 document.getElementById('form_marca').focus();
             } else {
-                document.getElementById('nf_modelo').value = ''; document.getElementById('nf_ref').value = ''; document.getElementById('nf_ficheiro').value = '';
+                document.getElementById('nf_modelo').value = ''; document.getElementById('nf_ref').value = ''; document.getElementById('nf_ficheiro').value = ''; document.getElementById('nf_certificado').value = '';
             }
         }
         async function enviarNovaFicha() {
             const marca = document.getElementById('form_marca').value.trim();
             const modelo = document.getElementById('nf_modelo').value.trim();
             const fich = document.getElementById('nf_ficheiro').files[0];
+            const cert = document.getElementById('nf_certificado').files[0];
             if (!marca) { alert('Preenche primeiro a Marca do artigo.'); document.getElementById('form_marca').focus(); return; }
-            if (!modelo) { alert('Indica o modelo da ficha.'); return; }
-            if (!fich) { alert('Escolhe o ficheiro da ficha técnica.'); return; }
-            if (fich.size > 10 * 1024 * 1024) { alert('O ficheiro tem mais de 10 MB.'); return; }
+            if (!modelo) { alert('Indica o modelo do produto.'); return; }
+            if (!fich && !cert) { alert('Escolhe a ficha técnica e/ou o certificado de conformidade.'); return; }
+            if ((fich && fich.size > 10 * 1024 * 1024) || (cert && cert.size > 10 * 1024 * 1024)) { alert('Cada ficheiro tem de ter no máximo 10 MB.'); return; }
             const fd = new FormData();
-            fd.append('marca', marca); fd.append('modelo', modelo); fd.append('referencia_fab', document.getElementById('nf_ref').value.trim()); fd.append('ficheiro', fich);
+            fd.append('marca', marca); fd.append('modelo', modelo); fd.append('referencia_fab', document.getElementById('nf_ref').value.trim());
+            if (fich) fd.append('ficheiro', fich);
+            if (cert) fd.append('certificado', cert);
             const btn = document.getElementById('btnEnviarFicha'); btn.disabled = true;
             try {
                 const json = await pedirJSON('?ajax_nova_ficha=1', fd);
@@ -891,7 +978,7 @@ natcasesort($marcas_lista);
                 document.getElementById('form_ficha_txt').value = f._et;
                 toggleNovaFicha(false);
                 mostrarFicha(f);
-                mostrarToast('Ficha carregada. Grava o artigo para a ligar.');
+                mostrarToast('Produto carregado. Grava o artigo para o ligar.');
             } catch (e) { alert(e.message); }
             finally { btn.disabled = false; }
         }
