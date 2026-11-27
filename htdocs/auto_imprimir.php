@@ -21,15 +21,34 @@ if (!function_exists('totalFoiAcertado')) {
     }
 }
 
+// =====================================================================
+// IMPRESSÃO DO AUTO DE MEDIÇÃO
+// Quando o auto tem trabalhos adjudicados E suplementares, saem 2 documentos separados:
+//   auto_imprimir.php?id=12&parte=adj → Auto de Medição — Trabalhos Adjudicados
+//   auto_imprimir.php?id=12&parte=sup → Auto de Medição — Trabalhos Suplementares
+//   auto_imprimir.php?id=12           → mostra os dois (um em cada folha), com um botão para imprimir cada um
+// Se só houver um dos tipos, sai só esse documento (como antes).
+// =====================================================================
 session_start();
 require_once 'db.php';
 
+// REGRA DE OURO 1: Validação de sessão
 if (!isset($_SESSION['user_id'])) { 
     header("Location: index.php"); 
     exit; 
 }
 
-$id_auto = $_GET['id'] ?? null;
+// REGRA DE OURO 2: Acesso restrito pela matriz de permissões (o mesmo acesso da ficha do auto)
+$perfil_user = $_SESSION['perfil'] ?? '';
+$stmt_perm = $pdo->prepare("SELECT modulo FROM permissoes WHERE grupo = :perfil AND pode_aceder = 1");
+$stmt_perm->execute(['perfil' => $perfil_user]);
+if (!in_array($perfil_user, ['admin', 'administrativo']) && !in_array('obras', $stmt_perm->fetchAll(PDO::FETCH_COLUMN))) {
+    header("Location: index.php?erro=sem_permissao");
+    exit;
+}
+
+// REGRA DE OURO 5: ID validado como número inteiro
+$id_auto = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
 if (!$id_auto) {
     die("Auto não especificado.");
 }
@@ -68,13 +87,100 @@ foreach ($itens as $it) {
         $itens_adj[] = $it;
     }
 }
+
+// Documentos a mostrar
+$parte = $_GET['parte'] ?? '';
+$docs = [];
+if ($parte === 'adj' && $itens_adj) $docs = ['adj'];
+elseif ($parte === 'sup' && $itens_sup) $docs = ['sup'];
+else {
+    if ($itens_adj) $docs[] = 'adj';
+    if ($itens_sup) $docs[] = 'sup';
+    if (!$docs) $docs = ['adj'];          // auto sem linhas: documento vazio, como antes
+}
+$dois_tipos = ($itens_adj && $itens_sup);
+$ver_os_dois = (count($docs) === 2);
+$TITULOS = ['adj' => 'Trabalhos Adjudicados', 'sup' => 'Trabalhos Suplementares'];
+
+// Título da página = nome do PDF ao "Guardar como PDF"
+$nome_doc = 'Auto ' . $auto['numero_auto'] . ' (v' . $versao_auto . ')'
+          . (count($docs) === 1 && $dois_tipos ? ' - ' . $TITULOS[$docs[0]] : '')
+          . ' - ' . $auto['obra_nome'];
+
+$fmt = fn($v, $d = 2) => number_format((float)$v, $d, ',', '.');
+
+// Linhas da tabela de um tipo (adjudicados ou suplementares). Devolve os totais.
+function linhasAuto($lista, $suplementar, $fmt) {
+    $t = ['adj' => 0, 'mes' => 0, 'acum' => 0, 'saldo' => 0];
+    foreach ($lista as $it) {
+        $q_adj = floatval($it['qtd_adjudicada']);
+        $p_un = floatval($it['preco_unitario']);
+        $t_adj = floatval($it['total_adjudicado']);
+        $q_mes = floatval($it['qtd_mes']);
+        $q_ant = floatval($it['qtd_anterior']);
+        $q_acum = floatval($it['qtd_acumulada']);
+        $t_acum = floatval($it['total_acumulado']);
+
+        // Total Adj. acertado à mão (≠ Qtd × P.Unit): ao completar a linha o mês absorve os cêntimos
+        $acerto = totalFoiAcertado($t_adj, $q_adj, $p_un);
+        if ($acerto && $q_adj > 0 && abs($q_acum - $q_adj) < 0.0005) {
+            $t_mes = (abs($q_ant - $q_adj) < 0.0005) ? 0.0 : round($t_adj - totLinha($q_ant, $p_un), 2);
+        } else {
+            $t_mes = totLinha($q_mes, $p_un);
+        }
+        // Acerto de cêntimos do Saldo € feito neste auto
+        $t_mes = round($t_mes + (float)($it['acerto_acum'] ?? 0) - (float)($it['acerto_ant'] ?? 0), 2);
+
+        $tem_qtd = $q_adj > 0;
+        $saldo_qtd = $q_adj - $q_acum;
+        $saldo_valor = round($t_adj - $t_acum, 2);   // Saldo € = Total Adj. − Acumulado €
+
+        $t['adj'] += $t_adj;
+        $t['mes'] += $t_mes;
+        $t['acum'] += $t_acum;
+        if (!$suplementar || $tem_qtd) $t['saldo'] += $saldo_valor;
+
+        echo '<tr>';
+        echo '<td>' . htmlspecialchars($it['artigo']) . '</td>';
+        echo '<td class="text-left">' . nl2br(htmlspecialchars($it['designacao'])) . '</td>';
+        echo '<td>' . htmlspecialchars($it['unidade']) . '</td>';
+        if ($suplementar) {
+            echo '<td>' . ($tem_qtd ? $fmt($q_adj) : '') . '</td>';
+            echo '<td>' . ($p_un != 0 ? $fmt($p_un, 3) . ' €' : '') . '</td>';
+            echo '<td>' . (($tem_qtd && $t_adj != 0) ? $fmt($t_adj) . ' €' : '') . '</td>';
+        } elseif ($tem_qtd) {
+            echo '<td>' . ($q_adj != 0 ? $fmt($q_adj) : '') . '</td>';
+            echo '<td>' . ($p_un != 0 ? $fmt($p_un, 3) . ' €' : '') . '</td>';
+            echo '<td>' . ($t_adj != 0 ? $fmt($t_adj) . ' €' : '') . '</td>';
+        } else {
+            echo '<td></td><td></td><td></td>';
+        }
+        echo '<td>' . ($q_mes != 0 ? $fmt($q_mes) : '') . '</td>';
+        echo '<td>' . ($t_mes != 0 ? $fmt($t_mes) . ' €' : '') . '</td>';
+        echo '<td>' . ($q_ant != 0 ? $fmt($q_ant) : '') . '</td>';
+        echo '<td>' . ($q_acum != 0 ? $fmt($q_acum) : '') . '</td>';
+        echo '<td>' . ($t_acum != 0 ? $fmt($t_acum) . ' €' : '') . '</td>';
+        if ($tem_qtd) {
+            echo '<td>' . $fmt($saldo_qtd) . '</td>';
+            echo '<td>' . $fmt($saldo_valor) . ' €</td>';
+        } else {
+            echo '<td></td><td></td>';
+        }
+        echo "</tr>\n";
+    }
+    return $t;
+}
 ?>
 <!DOCTYPE html>
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Auto de Medição #<?= $auto['numero_auto'] ?> (v<?= $versao_auto ?>) - <?= htmlspecialchars($auto['obra_nome']) ?></title>
+    <title><?= htmlspecialchars($nome_doc) ?></title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -179,6 +285,16 @@ foreach ($itens as $it) {
         .actions { margin-bottom: 20px; text-align: right; max-width: 297mm; margin-left: auto; margin-right: auto; }
         .btn { background: #b32a2a; color: #fff; border: none; padding: 10px 20px; font-weight: bold; cursor: pointer; border-radius: 5px; text-decoration: none; font-size: 12px; display: inline-block; }
         .btn-secundary { background: #576574; }
+        .actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .btn-voltar { width: 40px; height: 40px; border-radius: 50%; background: #fff; border: 1px solid #e8ecf1; color: #576574; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; font-size: 16px; margin-right: auto; box-shadow: 0 2px 6px rgba(0,0,0,0.04); }
+        .btn-voltar:hover { background: #eef2f6; color: #34495e; }
+        .btn-out { background: #fff; color: #b32a2a; border: 1px solid #b32a2a; }
+        .btn i { margin-right: 6px; }
+        .aviso-dois { max-width: 297mm; margin: 0 auto 15px; background: #fff8e1; color: #8a6d00; border: 1px solid #ffe082; border-radius: 8px; padding: 10px 14px; font-size: 12px; font-weight: 600; box-sizing: border-box; }
+        .print-container + .print-container { margin-top: 30px; }
+        .doc-tipo { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: bold; color: #fff; background: #b32a2a; padding: 3px 10px; border-radius: 4px; text-transform: uppercase; }
+        .doc-tipo.sup { background: #576574; }
+        @media (max-width: 700px) { body { padding: 10px; } .actions .btn { flex: 1 1 100%; text-align: center; } }
 
         /* OTIMIZAÇÕES DE IMPRESSÃO (A4 Horizontal) */
         @media print {
@@ -195,6 +311,7 @@ foreach ($itens as $it) {
                 print-color-adjust: exact !important; 
             }
             .print-container { box-shadow: none; max-width: none; padding: 0; margin: 0; }
+            .print-container + .print-container { margin-top: 0; page-break-before: always; break-before: page; }
             .no-print { display: none !important; }
             .info-grid { border: none; padding: 0; background: none !important; }
             
@@ -221,10 +338,22 @@ foreach ($itens as $it) {
 <body>
 
     <div class="actions no-print">
-        <a href="autos.php" class="btn btn-secundary" style="margin-right:10px;">Voltar à Listagem</a>
-        <button onclick="window.print()" class="btn">Imprimir / Guardar PDF</button>
+        <a href="autos.php" class="btn-voltar" title="Voltar" aria-label="Voltar"><i class="fa-solid fa-arrow-left"></i></a>
+        <?php if ($dois_tipos): ?>
+            <a href="auto_imprimir.php?id=<?= (int)$id_auto ?>&amp;parte=adj" class="btn<?= $docs === ['adj'] ? '' : ' btn-out' ?>"><i class="fa-solid fa-print"></i> Imprimir Auto Adjudicado</a>
+            <a href="auto_imprimir.php?id=<?= (int)$id_auto ?>&amp;parte=sup" class="btn<?= $docs === ['sup'] ? '' : ' btn-out' ?>"><i class="fa-solid fa-print"></i> Imprimir Auto Suplementar</a>
+            <?php if (!$ver_os_dois): ?><a href="auto_imprimir.php?id=<?= (int)$id_auto ?>" class="btn btn-secundary"><i class="fa-solid fa-copy"></i> Ver os dois</a><?php endif; ?>
+        <?php endif; ?>
+        <?php if (!$ver_os_dois): ?><button onclick="window.print()" class="btn"><i class="fa-solid fa-file-pdf"></i> Imprimir / Guardar PDF</button><?php endif; ?>
     </div>
+    <?php if ($ver_os_dois): ?>
+        <div class="aviso-dois no-print"><i class="fa-solid fa-circle-info"></i> Este auto tem trabalhos adjudicados e suplementares: saem em dois documentos separados. Use os botões acima para imprimir ou guardar cada um.</div>
+    <?php endif; ?>
 
+    <?php foreach ($docs as $doc_tipo):
+        $sup = ($doc_tipo === 'sup');
+        $lista = $sup ? $itens_sup : $itens_adj;
+    ?>
     <div class="print-container">
         
         <table class="wrapper-table">
@@ -238,6 +367,7 @@ foreach ($itens as $it) {
                             <div class="doc-title">
                                 <h1>Auto de Medição</h1>
                                 <p>Nº <?= htmlspecialchars($auto['numero_auto']) ?> (v<?= $versao_auto ?>)<?= !empty($auto['mes_referencia']) ? ' - ' . htmlspecialchars($auto['mes_referencia']) : '' ?></p>
+                                <?php if ($dois_tipos): ?><span class="doc-tipo<?= $sup ? ' sup' : '' ?>"><?= $TITULOS[$doc_tipo] ?></span><?php endif; ?>
                             </div>
                         </div>
 
@@ -265,15 +395,15 @@ foreach ($itens as $it) {
             <tbody>
                 <tr>
                     <td>
-                        <?php if (!empty($itens_adj)): ?>
-                        <div class="section-title">Trabalhos Adjudicados</div>
+                        <?php if ($lista): ?>
+                        <div class="section-title"><?= $TITULOS[$doc_tipo] ?></div>
                         <table class="data-table">
                             <thead>
                                 <tr>
                                     <th rowspan="2" class="col-artigo">Artigo</th>
                                     <th rowspan="2" class="col-desig text-left">Descrição</th>
                                     <th rowspan="2" class="col-un">Un.</th>
-                                    <th colspan="3">Adjudicado</th>
+                                    <th colspan="3"><?= $sup ? 'Suplementares' : 'Adjudicado' ?></th>
                                     <th colspan="2">Mês</th>
                                     <th colspan="3">Acumulado</th>
                                     <th colspan="2">Saldo</th>
@@ -292,184 +422,41 @@ foreach ($itens as $it) {
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php 
-                                $tot_adj = 0; $tot_mes_adj = 0; $tot_acum_adj = 0; $tot_saldo_adj = 0;
-                                foreach ($itens_adj as $it): 
-                                    $q_adj = floatval($it['qtd_adjudicada']);
-                                    $p_un = floatval($it['preco_unitario']);
-                                    $t_adj = floatval($it['total_adjudicado']);
-                                    $q_mes = floatval($it['qtd_mes']);
-                                    $q_ant = floatval($it['qtd_anterior']);
-                                    $q_acum = floatval($it['qtd_acumulada']);
-                                    $t_acum = floatval($it['total_acumulado']);
-
-                                    // Total Adj. acertado à mão (≠ Qtd × P.Unit): ao completar a linha o mês absorve os cêntimos
-                                    $acerto = totalFoiAcertado($t_adj, $q_adj, $p_un);
-                                    if ($acerto && $q_adj > 0 && abs($q_acum - $q_adj) < 0.0005) {
-                                        $t_mes = (abs($q_ant - $q_adj) < 0.0005) ? 0.0 : round($t_adj - totLinha($q_ant, $p_un), 2);
-                                    } else {
-                                        $t_mes = totLinha($q_mes, $p_un);
-                                    }
-                                    // Acerto de cêntimos do Saldo € feito neste auto
-                                    $t_mes = round($t_mes + (float)($it['acerto_acum'] ?? 0) - (float)($it['acerto_ant'] ?? 0), 2);
-                                    
-                                    $saldo_qtd = $q_adj - $q_acum;
-                                    $saldo_valor = round($t_adj - $t_acum, 2);   // Saldo € = Total Adj. − Acumulado €
-
-                                    $tot_adj += $t_adj;
-                                    $tot_mes_adj += $t_mes;
-                                    $tot_acum_adj += $t_acum;
-                                    $tot_saldo_adj += $saldo_valor;
-                                ?>
-                                <tr>
-                                    <td><?= htmlspecialchars($it['artigo']) ?></td>
-                                    <td class="text-left"><?= nl2br(htmlspecialchars($it['designacao'])) ?></td>
-                                    <td><?= htmlspecialchars($it['unidade']) ?></td>
-                                    
-                                    <?php if ($q_adj > 0): ?>
-                                        <td><?= $q_adj != 0 ? number_format($q_adj, 2, ',', '.') : '' ?></td>
-                                        <td><?= $p_un != 0 ? number_format($p_un, 3, ',', '.') . ' €' : '' ?></td>
-                                        <td><?= $t_adj != 0 ? number_format($t_adj, 2, ',', '.') . ' €' : '' ?></td>
-                                        <td><?= $q_mes != 0 ? number_format($q_mes, 2, ',', '.') : '' ?></td>
-                                        <td><?= $t_mes != 0 ? number_format($t_mes, 2, ',', '.') . ' €' : '' ?></td>
-                                        <td><?= $q_ant != 0 ? number_format($q_ant, 2, ',', '.') : '' ?></td>
-                                        <td><?= $q_acum != 0 ? number_format($q_acum, 2, ',', '.') : '' ?></td>
-                                        <td><?= $t_acum != 0 ? number_format($t_acum, 2, ',', '.') . ' €' : '' ?></td>
-                                        <td><?= number_format($saldo_qtd, 2, ',', '.') ?></td>
-                                        <td><?= number_format($saldo_valor, 2, ',', '.') ?> €</td>
-                                    <?php else: ?>
-                                        <td></td><td></td><td></td>
-                                        <td><?= $q_mes != 0 ? number_format($q_mes, 2, ',', '.') : '' ?></td>
-                                        <td><?= $t_mes != 0 ? number_format($t_mes, 2, ',', '.') . ' €' : '' ?></td>
-                                        <td><?= $q_ant != 0 ? number_format($q_ant, 2, ',', '.') : '' ?></td>
-                                        <td><?= $q_acum != 0 ? number_format($q_acum, 2, ',', '.') : '' ?></td>
-                                        <td><?= $t_acum != 0 ? number_format($t_acum, 2, ',', '.') . ' €' : '' ?></td>
-                                        <td></td><td></td>
-                                    <?php endif; ?>
-                                </tr>
-                                <?php endforeach; ?>
+                                <?php $tot = linhasAuto($lista, $sup, $fmt); ?>
                             </tbody>
                             <tfoot>
                                 <tr class="row-totais">
                                     <td colspan="3" class="text-right">TOTAIS</td>
                                     <td colspan="2"></td>
-                                    <td><?= number_format($tot_adj, 2, ',', '.') ?> €</td>
+                                    <td><?= $fmt($tot['adj']) ?> €</td>
                                     <td></td>
-                                    <td><?= number_format($tot_mes_adj, 2, ',', '.') ?> €</td>
+                                    <td><?= $fmt($tot['mes']) ?> €</td>
                                     <td colspan="2"></td>
-                                    <td><?= number_format($tot_acum_adj, 2, ',', '.') ?> €</td>
+                                    <td><?= $fmt($tot['acum']) ?> €</td>
                                     <td></td>
-                                    <td><?= number_format($tot_saldo_adj, 2, ',', '.') ?> €</td>
+                                    <td><?= $fmt($tot['saldo']) ?> €</td>
                                 </tr>
                             </tfoot>
                         </table>
-                        <?php else: $tot_mes_adj = 0; endif; ?>
-
-                        <?php if (!empty($itens_sup)): ?>
-                        <div class="section-title" style="margin-top:20px;">Trabalhos Suplementares</div>
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th rowspan="2" class="col-artigo">Artigo</th>
-                                    <th rowspan="2" class="col-desig text-left">Descrição</th>
-                                    <th rowspan="2" class="col-un">Un.</th>
-                                    <th colspan="3">Suplementares</th>
-                                    <th colspan="2">Mês</th>
-                                    <th colspan="3">Acumulado</th>
-                                    <th colspan="2">Saldo</th>
-                                </tr>
-                                <tr>
-                                    <th class="col-num">Qtd</th>
-                                    <th class="col-num">P. Unit</th>
-                                    <th class="col-num">Total</th>
-                                    <th class="col-num">Qtd</th>
-                                    <th class="col-num">Total</th>
-                                    <th class="col-num">Qtd Ant.</th>
-                                    <th class="col-num">Qtd Total</th>
-                                    <th class="col-num">Total €</th>
-                                    <th class="col-num">Qtd</th>
-                                    <th class="col-num">Valor €</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php 
-                                $tot_sup = 0; $tot_mes_sup = 0; $tot_acum_sup = 0; $tot_saldo_sup = 0;
-                                foreach ($itens_sup as $it): 
-                                    $q_adj = floatval($it['qtd_adjudicada']);
-                                    $p_un = floatval($it['preco_unitario']);
-                                    $t_adj = floatval($it['total_adjudicado']);
-                                    $q_mes = floatval($it['qtd_mes']);
-                                    $q_ant = floatval($it['qtd_anterior']);
-                                    $q_acum = floatval($it['qtd_acumulada']);
-                                    $t_acum = floatval($it['total_acumulado']);
-
-                                    // mesmas regras dos adjudicados (Total acertado à mão + acerto de cêntimos do saldo)
-                                    $acerto = totalFoiAcertado($t_adj, $q_adj, $p_un);
-                                    if ($acerto && $q_adj > 0 && abs($q_acum - $q_adj) < 0.0005) {
-                                        $t_mes = (abs($q_ant - $q_adj) < 0.0005) ? 0.0 : round($t_adj - totLinha($q_ant, $p_un), 2);
-                                    } else {
-                                        $t_mes = totLinha($q_mes, $p_un);
-                                    }
-                                    $t_mes = round($t_mes + (float)($it['acerto_acum'] ?? 0) - (float)($it['acerto_ant'] ?? 0), 2);
-
-                                    $tem_qtd = $q_adj > 0;   // suplementares com quantidade prevista
-                                    $saldo_qtd = $q_adj - $q_acum;
-                                    $saldo_valor = round($t_adj - $t_acum, 2);
-
-                                    $tot_sup += $t_adj;
-                                    $tot_mes_sup += $t_mes;
-                                    $tot_acum_sup += $t_acum;
-                                    if ($tem_qtd) $tot_saldo_sup += $saldo_valor;
-                                ?>
-                                <tr>
-                                    <td><?= htmlspecialchars($it['artigo']) ?></td>
-                                    <td class="text-left"><?= nl2br(htmlspecialchars($it['designacao'])) ?></td>
-                                    <td><?= htmlspecialchars($it['unidade']) ?></td>
-                                    <td><?= $tem_qtd ? number_format($q_adj, 2, ',', '.') : '' ?></td>
-                                    <td><?= $p_un != 0 ? number_format($p_un, 3, ',', '.') . ' €' : '' ?></td>
-                                    <td><?= ($tem_qtd && $t_adj != 0) ? number_format($t_adj, 2, ',', '.') . ' €' : '' ?></td>
-                                    <td><?= $q_mes != 0 ? number_format($q_mes, 2, ',', '.') : '' ?></td>
-                                    <td><?= $t_mes != 0 ? number_format($t_mes, 2, ',', '.') . ' €' : '' ?></td>
-                                    <td><?= $q_ant != 0 ? number_format($q_ant, 2, ',', '.') : '' ?></td>
-                                    <td><?= $q_acum != 0 ? number_format($q_acum, 2, ',', '.') : '' ?></td>
-                                    <td><?= $t_acum != 0 ? number_format($t_acum, 2, ',', '.') . ' €' : '' ?></td>
-                                    <td><?= $tem_qtd ? number_format($saldo_qtd, 2, ',', '.') : '' ?></td>
-                                    <td><?= $tem_qtd ? number_format($saldo_valor, 2, ',', '.') . ' €' : '' ?></td>
-                                </tr>
-                                <?php endforeach; ?>
-                            </tbody>
-                            <tfoot>
-                                <tr class="row-totais">
-                                    <td colspan="3" class="text-right">TOTAIS</td>
-                                    <td colspan="2"></td>
-                                    <td><?= number_format($tot_sup, 2, ',', '.') ?> €</td>
-                                    <td></td>
-                                    <td><?= number_format($tot_mes_sup, 2, ',', '.') ?> €</td>
-                                    <td colspan="2"></td>
-                                    <td><?= number_format($tot_acum_sup, 2, ',', '.') ?> €</td>
-                                    <td></td>
-                                    <td><?= number_format($tot_saldo_sup, 2, ',', '.') ?> €</td>
-                                </tr>
-                            </tfoot>
-                        </table>
-                        <?php else: $tot_mes_sup = 0; endif; ?>
+                        <?php else: $tot = ['mes' => 0]; endif; ?>
 
                         <div class="clearfix">
                             <table class="resumo">
-                                <tr>
-                                    <th>Total Adjudicado (Auto)</th>
-                                    <td><?= number_format($tot_mes_adj, 2, ',', '.') ?> €</td>
+                                <?php if ($dois_tipos): ?>
+                                <tr class="total-final">
+                                    <th>TOTAL DO AUTO (<?= $sup ? 'SUPLEMENTARES' : 'ADJUDICADOS' ?>)</th>
+                                    <td><?= $fmt($tot['mes']) ?> €</td>
                                 </tr>
-                                <?php if (!empty($itens_sup)): ?>
+                                <?php else: ?>
                                 <tr>
-                                    <th>Total Suplementar (Auto)</th>
-                                    <td><?= number_format($tot_mes_sup, 2, ',', '.') ?> €</td>
+                                    <th><?= $sup ? 'Total Suplementar (Auto)' : 'Total Adjudicado (Auto)' ?></th>
+                                    <td><?= $fmt($tot['mes']) ?> €</td>
                                 </tr>
-                                <?php endif; ?>
                                 <tr class="total-final">
                                     <th>TOTAL DO AUTO</th>
-                                    <td><?= number_format($auto['valor_total_mes'], 2, ',', '.') ?> €</td>
+                                    <td><?= $fmt($auto['valor_total_mes']) ?> €</td>
                                 </tr>
+                                <?php endif; ?>
                             </table>
                         </div>
                     </td>
@@ -481,24 +468,28 @@ foreach ($itens as $it) {
                 </tr>
             </tfoot>
         </table>
-        
-        <div class="page-footer-content">
-            <div class="footer-left"></div>
-            <div class="footer-center">
-                <strong>m.Abreu – Instalações Técnicas, Unipessoal, Lda.</strong><br>
-                Rua Damião de Góis, 205 | 4700-028 Braga | NIF: 514414120 | geral@mabreu.pt | +351 912 854 950
-            </div>
-            <div class="footer-right"></div>
-        </div>
 
     </div>
+    <?php endforeach; ?>
+        
+    <div class="page-footer-content">
+        <div class="footer-left"></div>
+        <div class="footer-center">
+            <strong>m.Abreu – Instalações Técnicas, Unipessoal, Lda.</strong><br>
+            Rua Damião de Góis, 205 | 4700-028 Braga | NIF: 514414120 | geral@mabreu.pt | +351 912 854 950
+        </div>
+        <div class="footer-right"></div>
+    </div>
 
+    <?php if (!$ver_os_dois): ?>
     <script>
+        // Um só documento: abre logo a janela de impressão (com os dois, escolhe-se qual imprimir nos botões)
         window.onload = function() {
             setTimeout(function() {
                 window.print();
             }, 500);
         }
     </script>
+    <?php endif; ?>
 </body>
 </html>
