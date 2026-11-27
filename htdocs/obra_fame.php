@@ -160,6 +160,9 @@ $bib_js = [];
 foreach ($bib['id'] as $f) {
     if ((int)$f['ativo'] !== 1) continue;
     $bib_js[mb_strtolower($f['nome'], 'UTF-8')] = ['u' => $f['existe'] ? $f['url'] : '', 'm' => (string)$f['marca'], 'r' => (string)$f['referencia']];
+    // linhas gravadas com o nome antigo ("Marca Modelo") continuam a mostrar o link da ficha
+    if (!isset($bib_js[mb_strtolower($f['nome_antigo'], 'UTF-8')])) $bib_js[mb_strtolower($f['nome_antigo'], 'UTF-8')] = $bib_js[mb_strtolower($f['nome'], 'UTF-8')];
+    unset($l_fic[$f['nome_antigo']]);
     if ((string)$f['marca'] !== '') $l_fab[$f['marca']] = 1;
     if ((string)$f['referencia'] !== '') $l_ref[$f['referencia']] = 1;
     unset($l_fic[$f['nome']]);

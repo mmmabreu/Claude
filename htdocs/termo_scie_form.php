@@ -33,10 +33,10 @@ ft_migrar($pdo);
 // Artigos da tabela de preços (com indicação de ficha técnica / certificado na biblioteca)
 $artigos_tab = [];
 try {
-    foreach ($pdo->query("SELECT t.id, t.referencia, t.descricao, t.marca, f.ficheiro AS f_fich, f.cert_ficheiro AS f_cert, f.marca AS f_marca
+    foreach ($pdo->query("SELECT t.id, t.referencia, t.descricao, t.marca, f.ficheiro AS f_fich, f.cert_ficheiro AS f_cert, f.marca AS f_marca, f.referencia AS f_ref
                           FROM tabela_precos t LEFT JOIN fichas_tecnicas f ON f.id = t.id_ficha_tecnica AND f.ativo = 1
                           ORDER BY t.descricao ASC")->fetchAll(PDO::FETCH_ASSOC) as $a) {
-        $artigos_tab[(int)$a['id']] = ['id' => (int)$a['id'], 'r' => trim((string)$a['referencia']), 'd' => trim((string)$a['descricao']),
+        $artigos_tab[(int)$a['id']] = ['id' => (int)$a['id'], 'r' => trim((string)$a['referencia']) !== '' ? trim((string)$a['referencia']) : trim((string)$a['f_ref']), 'd' => trim((string)$a['descricao']),
                                       'm' => trim((string)($a['marca'] ?: $a['f_marca'])), 'ft' => (string)$a['f_fich'] !== '' ? 1 : 0, 'ct' => (string)$a['f_cert'] !== '' ? 1 : 0];
     }
 } catch (Exception $e) { error_log('termo_scie_form.php (artigos): ' . $e->getMessage()); }
@@ -567,8 +567,12 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
         const ART_ID = {}, ART_ROTULO = {};
         (function () {
             const dl = document.getElementById('dl_artigos'), frag = document.createDocumentFragment();
+            const vistos = {};
             ARTIGOS.forEach(a => {
-                a.l = [a.r, a.d, a.m].filter(Boolean).join(' · ');
+                // Regra da pesquisa de material: descrição | referência do fabricante | marca
+                a.l = [a.d, a.r, a.m].filter(Boolean).join(' | ');
+                if (vistos[a.l.toLowerCase()]) a.l += ' #' + a.id;
+                vistos[a.l.toLowerCase()] = 1;
                 ART_ID[a.id] = a; ART_ROTULO[a.l] = a;
                 const o = document.createElement('option'); o.value = a.l; frag.appendChild(o);
             });
@@ -592,7 +596,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
             if (a.m) tr.querySelector('.i-marca').value = a.m;
             marcarArtigo(tr, a.id);
             inp.title = a.l;
-            setTimeout(() => { inp.scrollLeft = 0; }, 0);   // mostra o início (referência) e não o fim do texto
+            setTimeout(() => { inp.scrollLeft = 0; }, 0);   // mostra o início (descrição) e não o fim do texto
         }
 
         // Menu do utilizador (toque em ecrãs táteis)

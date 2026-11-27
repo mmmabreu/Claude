@@ -140,8 +140,14 @@ $art_orc = artigosOrcamento($pdo, $orc['id'] ?? 0);
 // ---------- TABELA DE PREÇOS (tempo × nº de colaboradores = minutos de mão de obra por unidade) ----------
 $art_tab = [];
 try {
-    foreach ($pdo->query("SELECT id, referencia, descricao, unidade, preco_custo, tempo_mao_obra, n_colaboradores FROM tabela_precos")->fetchAll(PDO::FETCH_ASSOC) as $t) {
-        $art_tab[(int)$t['id']] = ['id' => (int)$t['id'], 'ref' => (string)$t['referencia'], 'desc' => (string)$t['descricao'], 'un' => (string)$t['unidade'],
+    $tem_fichas = (bool)$pdo->query("SHOW TABLES LIKE 'fichas_tecnicas'")->fetch();
+    $sql_tab = $tem_fichas
+        ? "SELECT t.id, t.referencia, t.descricao, t.unidade, t.preco_custo, t.tempo_mao_obra, t.n_colaboradores, COALESCE(NULLIF(t.marca, ''), f.marca) AS marca, f.referencia AS ref_fab
+           FROM tabela_precos t LEFT JOIN fichas_tecnicas f ON f.id = t.id_ficha_tecnica"
+        : "SELECT id, referencia, descricao, unidade, preco_custo, tempo_mao_obra, n_colaboradores, '' AS marca, '' AS ref_fab FROM tabela_precos";
+    foreach ($pdo->query($sql_tab)->fetchAll(PDO::FETCH_ASSOC) as $t) {
+        $art_tab[(int)$t['id']] = ['id' => (int)$t['id'], 'ref' => trim((string)$t['referencia']) !== '' ? trim((string)$t['referencia']) : trim((string)$t['ref_fab']),
+                                  'marca' => trim((string)$t['marca']), 'desc' => (string)$t['descricao'], 'un' => (string)$t['unidade'],
                                   'pc' => (float)$t['preco_custo'], 't' => (float)$t['tempo_mao_obra'] * max(1, (int)$t['n_colaboradores'])];
     }
 } catch (Exception $ex) { error_log('obra_compras.php (tabela): ' . $ex->getMessage()); }
@@ -375,8 +381,19 @@ try {
 
 // Lista para associar (orçamento + tabela) e memória, para o browser
 $opcoes = [];
-foreach ($art_orc as $k => $a) $opcoes[] = ['v' => 'o:' . $k, 'l' => 'ORÇ · ' . $a['designacao'] . ' [' . $a['unidade'] . ']', 'un' => $a['unidade'], 'id_tab' => $a['id_tab'], 'd' => $a['designacao'], 'ref' => ''];
-foreach ($art_tab as $t) $opcoes[] = ['v' => 't:' . $t['id'], 'l' => 'TAB · ' . ($t['ref'] !== '' ? $t['ref'] . ' · ' : '') . $t['desc'] . ' [' . $t['un'] . ']', 'un' => $t['un'], 'id_tab' => $t['id'], 'd' => $t['desc'], 'ref' => $t['ref']];
+// Regra da pesquisa de material: "descrição | referência do fabricante | marca" (os do orçamento da obra levam "(orçamento)")
+$rotulo_v = []; $vistos_rot = [];
+$rotulo = function ($d, $r, $m, $suf, $v) use (&$rotulo_v, &$vistos_rot) {
+    $l = implode(' | ', array_filter([trim((string)$d), trim((string)$r), trim((string)$m)], 'strlen')) . $suf;
+    if (isset($vistos_rot[mb_strtolower($l, 'UTF-8')])) $l .= ' #' . substr($v, 2);   // rótulos iguais: acrescenta o nº
+    $vistos_rot[mb_strtolower($l, 'UTF-8')] = 1;
+    return $rotulo_v[$v] = $l;
+};
+foreach ($art_orc as $k => $a) {
+    $ta = $a['id_tab'] ? ($art_tab[$a['id_tab']] ?? null) : null;
+    $opcoes[] = ['v' => 'o:' . $k, 'l' => $rotulo($a['designacao'], $ta['ref'] ?? '', $ta['marca'] ?? '', ' (orçamento)', 'o:' . $k), 'un' => $a['unidade'], 'id_tab' => $a['id_tab'], 'd' => $a['designacao'], 'ref' => $ta['ref'] ?? ''];
+}
+foreach ($art_tab as $t) $opcoes[] = ['v' => 't:' . $t['id'], 'l' => $rotulo($t['desc'], $t['ref'], $t['marca'], '', 't:' . $t['id']), 'un' => $t['un'], 'id_tab' => $t['id'], 'd' => $t['desc'] . ' ' . $t['marca'], 'ref' => $t['ref']];
 $memoria = [];
 try {
     foreach ($pdo->query("SELECT * FROM compras_memoria")->fetchAll(PDO::FETCH_ASSOC) as $m) {
@@ -391,9 +408,9 @@ try {
         elseif ($alvo !== '') $memoria[$m['chave']] = ['alvo' => $alvo, 'fator' => (float)$m['fator']];
     }
 } catch (Exception $ex) {}
-$rotulo_alvo = function ($l) use ($art_orc, $art_tab) {
-    if ($l['orc_designacao'] !== null) { $k = fameChave($l['orc_designacao'], $l['orc_unidade']); return isset($art_orc[$k]) ? 'ORÇ · ' . $art_orc[$k]['designacao'] . ' [' . $art_orc[$k]['unidade'] . ']' : 'ORÇ · ' . $l['orc_designacao']; }
-    if ($l['id_artigo_tabela'] && isset($art_tab[(int)$l['id_artigo_tabela']])) { $t = $art_tab[(int)$l['id_artigo_tabela']]; return 'TAB · ' . ($t['ref'] !== '' ? $t['ref'] . ' · ' : '') . $t['desc'] . ' [' . $t['un'] . ']'; }
+$rotulo_alvo = function ($l) use ($art_orc, $art_tab, $rotulo_v) {
+    if ($l['orc_designacao'] !== null) { $k = fameChave($l['orc_designacao'], $l['orc_unidade']); return $rotulo_v['o:' . $k] ?? ($l['orc_designacao'] . ' (orçamento)'); }
+    if ($l['id_artigo_tabela'] && isset($rotulo_v['t:' . (int)$l['id_artigo_tabela']])) return $rotulo_v['t:' . (int)$l['id_artigo_tabela']];
     return '';
 };
 $valor_alvo = function ($l) use ($art_orc) {

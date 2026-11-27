@@ -58,7 +58,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id_cabo = filter_input(INPUT_POST, 'id_artigo_cabo', FILTER_VALIDATE_INT);
         foreach (itedCabosTabela($pdo) as $cb) if ($cb['id'] === $id_cabo) {
             $campos['id_artigo_cabo'] = $id_cabo;
-            $campos['cabo_texto'] = mb_substr(implode(' · ', array_filter([$cb['r'], $cb['d'], $cb['m']])), 0, 255);
+            $campos['cabo_texto'] = mb_substr(implode(' | ', array_filter([$cb['d'], $cb['r'], $cb['m']])), 0, 255);
         }
         // Pontos RJ45
         $pontos = json_decode((string)($_POST['pontos_json'] ?? '[]'), true);
@@ -371,7 +371,10 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     const CABO_ROTULO = {}, CABO_ID = {};
     function iniciarCabo() {
         const dl = document.getElementById('dl_cabos');
-        CABOS.forEach(c => { c.l = [c.r, c.d, c.m].filter(Boolean).join(' · '); CABO_ROTULO[c.l] = c; CABO_ID[c.id] = c;
+        const vistos = {};
+        // Regra da pesquisa de material: descrição | referência do fabricante | marca
+        CABOS.forEach(c => { c.l = [c.d, c.r, c.m].filter(Boolean).join(' | '); if (vistos[c.l.toLowerCase()]) c.l += ' #' + c.id; vistos[c.l.toLowerCase()] = 1;
+            CABO_ROTULO[c.l] = c; CABO_ID[c.id] = c;
             const o = document.createElement('option'); o.value = c.l; dl.appendChild(o); });
         const atual = CABO_ID[parseInt(document.getElementById('id_artigo_cabo').value || 0, 10)];
         if (atual) { document.getElementById('cabo_txt').value = atual.l; mostrarCabo(atual); if (atual.cat) CAT_PADRAO = atual.cat; }

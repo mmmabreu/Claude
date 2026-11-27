@@ -647,8 +647,13 @@ function fameMaterialAprovisionar($pdo, $id_obra, $id_orcamento) {
 }
 
 // ---------- Fichas técnicas (biblioteca fichas_tecnicas/, ver fichas_tecnicas.php) ----------
-// Nome que aparece na FAME: "Marca Modelo"
-function fameFichaNome($f) { return trim(preg_replace('/\s+/', ' ', (string)($f['marca'] ?? '') . ' ' . (string)($f['modelo'] ?? ''))); }
+// Nome que aparece na FAME (regra da pesquisa de material): "Modelo | Referência do fabricante | Marca"
+function fameFichaNome($f) {
+    $p = array_filter([trim((string)($f['modelo'] ?? '')), trim((string)($f['referencia'] ?? '')), trim((string)($f['marca'] ?? ''))], 'strlen');
+    return preg_replace('/\s+/', ' ', implode(' | ', $p));
+}
+// Nome no formato antigo ("Marca Modelo"): as FAME já gravadas guardam este texto e continuam ligadas
+function fameFichaNomeAntigo($f) { return trim(preg_replace('/\s+/', ' ', (string)($f['marca'] ?? '') . ' ' . (string)($f['modelo'] ?? ''))); }
 
 // Biblioteca: ['id' => [id => ficha + nome + url], 'nome' => [nome em minúsculas => id] (só as ativas)]
 function fameBiblioteca($pdo) {
@@ -658,10 +663,15 @@ function fameBiblioteca($pdo) {
     try {
         foreach ($pdo->query("SELECT * FROM fichas_tecnicas ORDER BY marca ASC, modelo ASC")->fetchAll(PDO::FETCH_ASSOC) as $f) {
             $f['nome'] = fameFichaNome($f);
+            $f['nome_antigo'] = fameFichaNomeAntigo($f);
             $f['url'] = 'fichas_tecnicas/' . rawurlencode(basename((string)$f['ficheiro']));
             $f['existe'] = $f['ficheiro'] !== '' && is_file('fichas_tecnicas/' . basename((string)$f['ficheiro']));
             $cache['id'][(int)$f['id']] = $f;
-            if ((int)$f['ativo'] === 1) $cache['nome'][mb_strtolower($f['nome'], 'UTF-8')] = (int)$f['id'];
+            if ((int)$f['ativo'] === 1) {
+                $cache['nome'][mb_strtolower($f['nome'], 'UTF-8')] = (int)$f['id'];
+                $k_ant = mb_strtolower($f['nome_antigo'], 'UTF-8');
+                if (!isset($cache['nome'][$k_ant])) $cache['nome'][$k_ant] = (int)$f['id'];
+            }
         }
     } catch (Exception $e) {}   // ainda não há biblioteca
     return $cache;
@@ -673,7 +683,7 @@ function fameResolverFicha($bib, $id, $texto) {
     if ($id && isset($bib['id'][$id])) {
         // se o texto foi mudado para outra coisa, deixa de estar ligada
         $t = mb_strtolower(trim((string)$texto), 'UTF-8');
-        if ($t === '' || $t === mb_strtolower($bib['id'][$id]['nome'], 'UTF-8')) return $id;
+        if ($t === '' || $t === mb_strtolower($bib['id'][$id]['nome'], 'UTF-8') || $t === mb_strtolower($bib['id'][$id]['nome_antigo'] ?? '', 'UTF-8')) return $id;
     }
     $t = mb_strtolower(trim(preg_replace('/\s+/', ' ', (string)$texto)), 'UTF-8');
     return ($t !== '' && isset($bib['nome'][$t])) ? $bib['nome'][$t] : 0;

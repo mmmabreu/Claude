@@ -28,6 +28,8 @@ Estas regras ficam assinaladas nos comentários do código com `REGRA DE OURO`.
 - **Cabeçalho**: sem ícones de navegação rápida.
 - **Botão voltar**: redondo, só com a seta, sem texto.
 - **Menu do utilizador**: abre com um toque em ecrãs táteis (não depender de hover).
+- **Pesquisa de material**: em todas as pesquisas / listas de escolha de artigos ou produtos, cada opção aparece sempre como
+  `descrição | referência do fabricante | marca` (partes vazias omitidas). A pesquisa encontra por qualquer uma das três.
 - **Nunca perder dados**: ao alterar, substituir ou "apagar", guardar histórico ou arquivar. Os apagamentos pedem a password de segurança.
 - **Nome dos PDFs de orçamento**: sempre `ORC{número}.pdf`.
 - **Instalações elétricas**: os cálculos respeitam sempre as RTIEBT.

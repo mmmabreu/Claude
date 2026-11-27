@@ -172,6 +172,17 @@ try {
     if ($stmt_tp) {
         $tabela_precos_js = $stmt_tp->fetchAll(PDO::FETCH_ASSOC);
     }
+    // Marca (e referência do fabricante, se o artigo não tiver referência) para a regra da pesquisa de material
+    try {
+        $marcas_tp = [];
+        foreach ($pdo->query("SELECT t.id, COALESCE(NULLIF(t.marca, ''), f.marca, '') AS marca, COALESCE(f.referencia, '') AS ref_fab
+                              FROM tabela_precos t LEFT JOIN fichas_tecnicas f ON f.id = t.id_ficha_tecnica")->fetchAll(PDO::FETCH_ASSOC) as $m) $marcas_tp[(int)$m['id']] = $m;
+        foreach ($tabela_precos_js as &$tp) {
+            $tp['marca'] = trim((string)($marcas_tp[(int)$tp['id']]['marca'] ?? ''));
+            if (trim((string)$tp['referencia']) === '') $tp['referencia'] = trim((string)($marcas_tp[(int)$tp['id']]['ref_fab'] ?? ''));
+        }
+        unset($tp);
+    } catch (Exception $e) {}   // sem marca / biblioteca de fichas: fica só descrição | referência
 } catch (Exception $e) {}
 
 // Fichas técnicas dos artigos da tabela de preços (ícone na linha do orçamento): [id_artigo => [u => link, n => nome]]
@@ -2264,10 +2275,12 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             }
         }
 
+        // Regra da pesquisa de material: cada artigo aparece como "descrição | referência do fabricante | marca"
+        function rotuloMaterial(item) { return [item.descricao, item.referencia, item.marca].map(x => String(x || '').trim()).filter(Boolean).join(' | '); }
         function pontuarArtigo(item, pesquisaOriginal) {
             let score = 0; const textoBusca = pesquisaOriginal.trim().toLowerCase(); if (!textoBusca) return 0;
-            const itemDesc = item.descricao.toLowerCase(); const itemRef = item.referencia.toLowerCase();
-            const fullText = itemRef + " " + itemDesc; const primeiraPalavra = textoBusca.split(' ')[0];
+            const itemDesc = (item.descricao || '').toLowerCase(); const itemRef = (item.referencia || '').toLowerCase();
+            const fullText = itemRef + " " + itemDesc + " " + String(item.marca || '').toLowerCase(); const primeiraPalavra = textoBusca.split(' ')[0];
             const tokens = textoBusca.match(/[a-zà-ÿ0-9]+/g) || [];
             if (itemDesc.startsWith(textoBusca) || itemRef.startsWith(textoBusca)) { score += 1000; }
             else if (fullText.includes(textoBusca)) { score += 500; }
@@ -2289,7 +2302,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                 matches.slice(0, 8).forEach(item => {
                     const div = document.createElement('div'); div.className = 'preco-autocomplete-item';
                     const pCustoFormatado = formatNumberToPT(item.preco_custo); const pVendaFormatado = item.preco_com_mo ? formatNumberToPT(item.preco_com_mo) : '0,00';
-                    div.innerHTML = `<div>${escapeHTML(item.descricao)}</div><strong>Custo: ${pCustoFormatado} € <span style="color:#94a3b8;font-weight:normal;font-size:11px;">| Venda: ${pVendaFormatado} €</span>${item.referencia ? ` <span style="color:#576574;font-weight:700;font-size:11px;background:#f1f2f6;border-radius:4px;padding:1px 6px;margin-left:4px;">Ref. ${escapeHTML(item.referencia)}</span>` : ''}</strong>`;
+                    div.innerHTML = `<div>${escapeHTML(rotuloMaterial(item))}</div><strong>Custo: ${pCustoFormatado} € <span style="color:#94a3b8;font-weight:normal;font-size:11px;">| Venda: ${pVendaFormatado} €</span></strong>`;
                     div.onmousedown = function(e) {
                         e.preventDefault(); pcInput.value = pCustoFormatado;
                         const pvInput = row.querySelector('.pv'); if (pvInput) pvInput.value = pVendaFormatado;
@@ -2324,7 +2337,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             if(lista.length === 0) { container.innerHTML = '<div style="padding:25px; text-align:center; color:var(--gray);">Nenhum artigo encontrado.</div>'; return; }
             lista.forEach(item => {
                 const div = document.createElement('div'); div.className = 'preco-autocomplete-item';
-                div.innerHTML = `<div style="display:flex; justify-content:space-between; width:100%;"><div><strong>${escapeHTML(item.referencia)}</strong><br>${escapeHTML(item.descricao)}</div><div style="font-weight:800; color:var(--primary); font-size:15px;">${formatNumberToPT(item.preco_custo)} €</div></div>`;
+                div.innerHTML = `<div style="display:flex; justify-content:space-between; width:100%;"><div>${escapeHTML(rotuloMaterial(item))}</div><div style="font-weight:800; color:var(--primary); font-size:15px;">${formatNumberToPT(item.preco_custo)} €</div></div>`;
                 div.onclick = function() { selecionarPrecoTabela(item); }; container.appendChild(div);
             });
         }
@@ -2604,7 +2617,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             box.innerHTML = '';
             res.forEach(({ item }) => {
                 const d = document.createElement('div');
-                d.innerHTML = '<b>' + escapeHTML(item.referencia || '') + '</b> ' + escapeHTML(item.descricao || '') + ' <span style="color:#94a3b8;">· ' + numPT(item.preco_custo) + ' € custo · ' + numPT(item.preco_com_mo || 0) + ' € venda</span>';
+                d.innerHTML = escapeHTML(rotuloMaterial(item)) + ' <span style="color:#94a3b8;">· ' + numPT(item.preco_custo) + ' € custo · ' + numPT(item.preco_com_mo || 0) + ' € venda</span>';
                 d.onmousedown = e => { e.preventDefault(); compItens.push(itemDaTabela(item)); document.getElementById('compPesquisa').value = ''; box.style.display = 'none'; desenharComposicao(true); };
                 box.appendChild(d);
             });

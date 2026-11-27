@@ -578,7 +578,7 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
             const lig = ligados.has(a.k);
             const outra = a.f && a.f !== fichaAtual ? '<span class="o" title="Tem outra ficha">' + esc(NOME_FICHA[a.f] || 'outra ficha') + '</span>' : '';
             return '<label class="art-linha' + (lig ? ' ligado' : '') + '"><input type="checkbox" ' + (lig ? 'checked' : '') + ' data-k="' + esc(a.k) + '" onchange="marcarArtigo(this.dataset.k, this.checked)">'
-                 + '<span class="r">' + esc(a.r) + '</span><span class="d">' + esc(a.d) + (a.m ? ' <span class="sub">· ' + esc(a.m) + '</span>' : '') + '</span>' + outra + '</label>';
+                 + '<span class="d">' + [esc(a.d), a.r ? '<b>' + esc(a.r) + '</b>' : '', a.m ? '<span class="sub">' + esc(a.m) + '</span>' : ''].filter(Boolean).join(' | ') + '</span>' + outra + '</label>';
         }).join('') + (mais ? '<div class="sub" style="padding:8px 10px;">Mostram-se os primeiros 60 — afina a pesquisa.</div>' : '');
     }
     function marcarArtigo(k, on) { if (on) ligados.add(k); else ligados.delete(k); desenharChips(); listarArtigos(); }

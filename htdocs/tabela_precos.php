@@ -704,7 +704,7 @@ natcasesort($marcas_lista);
                         <label>Ficha Técnica / Certificado de conformidade</label>
                         <input type="hidden" name="id_ficha_tecnica" id="form_id_ficha" value="">
                         <div class="ficha-linha">
-                            <input type="text" id="form_ficha_txt" list="dl_fichas_tp" placeholder="Escolher da biblioteca (escreve a marca ou o modelo)…" oninput="fichaEscrita(this)" autocomplete="off">
+                            <input type="text" id="form_ficha_txt" list="dl_fichas_tp" placeholder="Escolher da biblioteca (escreve o modelo, a referência ou a marca)…" oninput="fichaEscrita(this)" autocomplete="off">
                             <a href="#" target="_blank" class="btn-mini" id="btnVerFicha" style="display:none;" title="Abrir a ficha"><i class="fa-solid fa-file-pdf" style="color:#c0392b;"></i></a>
                             <button type="button" class="btn-mini verde" onclick="toggleNovaFicha()" title="Carregar um produto novo (ficha técnica e/ou certificado) para a biblioteca"><i class="fa-solid fa-cloud-arrow-up"></i> Nova</button>
                         </div>
@@ -869,7 +869,8 @@ natcasesort($marcas_lista);
         const TEM_FICHAS = <?= $tem_fichas ? 'true' : 'false' ?>;
         let fichasBib = <?= json_encode(array_values($fichas_bib), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS) ?>;
         // Texto que aparece na lista: "Marca Modelo · Ref." (único)
-        function nomeFicha(f) { return (f.marca + ' ' + f.modelo).trim() + (f.referencia ? ' · ' + f.referencia : ''); }
+        // Regra da pesquisa de material: descrição (modelo) | referência do fabricante | marca
+        function nomeFicha(f) { return [f.modelo, f.referencia, f.marca].map(x => (x || '').trim()).filter(Boolean).join(' | '); }
         function etiquetasFichas() {
             const vistos = {}, mapa = {};
             fichasBib.forEach(f => {

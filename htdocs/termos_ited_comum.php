@@ -178,13 +178,13 @@ function itedCabosTabela($pdo) {
     try {
         $tem_fichas = (bool)$pdo->query("SHOW TABLES LIKE 'fichas_tecnicas'")->fetch();
         $sql = $tem_fichas
-            ? "SELECT t.id, t.referencia, t.descricao, t.marca, f.ficheiro AS ft, f.cert_ficheiro AS ct FROM tabela_precos t LEFT JOIN fichas_tecnicas f ON f.id = t.id_ficha_tecnica AND f.ativo = 1"
-            : "SELECT t.id, t.referencia, t.descricao, t.marca, '' AS ft, '' AS ct FROM tabela_precos t";
+            ? "SELECT t.id, t.referencia, t.descricao, COALESCE(NULLIF(t.marca, ''), f.marca) AS marca, f.referencia AS ref_fab, f.ficheiro AS ft, f.cert_ficheiro AS ct FROM tabela_precos t LEFT JOIN fichas_tecnicas f ON f.id = t.id_ficha_tecnica AND f.ativo = 1"
+            : "SELECT t.id, t.referencia, t.descricao, t.marca, '' AS ref_fab, '' AS ft, '' AS ct FROM tabela_precos t";
         foreach ($pdo->query($sql . " ORDER BY t.descricao ASC")->fetchAll(PDO::FETCH_ASSOC) as $a) {
             $d = (string)$a['descricao'];
             // Só cabos de dados (pares de cobre): U/UTP, F/UTP, S/FTP, F/FTP… ou com a categoria na descrição
             if (!preg_match('/\b(([usf]{1,2}\/?)?(utp|ftp|stp)|cat\.?\s*(5e|6a|6|7a|7|8))\b/i', $d)) continue;
-            $res[] = ['id' => (int)$a['id'], 'r' => trim((string)$a['referencia']), 'd' => trim($d), 'm' => trim((string)($a['marca'] ?? '')),
+            $res[] = ['id' => (int)$a['id'], 'r' => trim((string)$a['referencia']) !== '' ? trim((string)$a['referencia']) : trim((string)$a['ref_fab']), 'd' => trim($d), 'm' => trim((string)($a['marca'] ?? '')),
                       'cat' => itedCategoriaDoCabo($d), 'ft' => (string)$a['ft'] !== '' ? 1 : 0, 'ct' => (string)$a['ct'] !== '' ? 1 : 0];
         }
     } catch (Exception $e) {}
