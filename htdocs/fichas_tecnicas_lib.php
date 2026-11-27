@@ -82,6 +82,7 @@ function ft_slug($txt, $max = 40) {
 }
 
 // Valida e grava um ficheiro enviado. Devolve [nome_gravado, nome_original, tamanho] ou lança Exception.
+// ($marca, $modelo e $prefixo já não são usados no nome do ficheiro; ficam para não mexer nas chamadas)
 function ft_guardar_upload(array $f, $marca, $modelo, $prefixo = '') {
     if (($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
         $erros = [UPLOAD_ERR_INI_SIZE => 'é maior do que o servidor aceita', UPLOAD_ERR_FORM_SIZE => 'é demasiado grande',
@@ -100,8 +101,16 @@ function ft_guardar_upload(array $f, $marca, $modelo, $prefixo = '') {
     }
     if ($tipo === '') throw new Exception('O ficheiro «' . $f['name'] . '» não é PDF, JPG nem PNG.');
     if (!is_dir(FT_PASTA)) @mkdir(FT_PASTA, 0755, true);
-    $nome = $prefixo . ft_slug($marca, 25) . '_' . ft_slug($modelo !== '' ? $modelo : pathinfo($f['name'], PATHINFO_FILENAME), 45)
-          . '_' . date('ymd') . bin2hex(random_bytes(2)) . '.' . $tipo;
+    // O ficheiro fica com o NOME ORIGINAL (só se tiram caracteres que não podem existir num nome de ficheiro).
+    // Se já existir um ficheiro com esse nome, acrescenta " (2)", " (3)"… — o anterior nunca é substituído.
+    $base = pathinfo(basename(str_replace('\\', '/', (string)$f['name'])), PATHINFO_FILENAME);
+    $base = preg_replace('/[\x00-\x1F\x7F\/\\\\:*?"<>|#%]+/u', ' ', $base);
+    $base = trim(preg_replace('/\s+/u', ' ', $base), " .");
+    if ($base === '') $base = 'documento';
+    $base = mb_substr($base, 0, 150, 'UTF-8');
+    $ext_final = ($tipo === 'jpg' && in_array($ext, ['jpg', 'jpeg'], true)) ? $ext : $tipo;   // mantém .jpeg se era .jpeg
+    $nome = $base . '.' . $ext_final;
+    for ($i = 2; file_exists(FT_PASTA . $nome); $i++) $nome = $base . ' (' . $i . ').' . $ext_final;
     if (!move_uploaded_file($f['tmp_name'], FT_PASTA . $nome)) throw new Exception('Não foi possível gravar «' . $f['name'] . '» na pasta ' . FT_PASTA . '.');
     return [$nome, mb_substr((string)$f['name'], 0, 255), (int)$f['size']];
 }
