@@ -428,10 +428,10 @@ foreach ($itens as $item) {
     $pdf->SetFont('Arial', '', ($is_gestao) ? 7 : 8);
     $h = $linha_altura_base * max(1, $pdf->NbLines($w[1], $desig));
 
-    // LINHA EXCLUÍDA (não é da especialidade): aparece com sombreado vermelho, «EXCLUÍDO» no lugar do valor
-    // e a indicação por baixo. Não conta em nenhum total; o texto está também em «A proposta não inclui».
+    // LINHA EXCLUÍDA (não é da especialidade): aparece com sombreado vermelho e «EXCLUÍDO» à direita.
+    // Não conta em nenhum total; o texto está também em «A proposta não inclui».
     if (!empty($item['excluida'])) {
-        $h_ex = $h + 4;
+        $h_ex = $h;
         if ($pdf->GetY() + $h_ex > 270) { $pdf->AddPage(); $draw_header(); $pdf->SetFont('Arial', '', ($is_gestao) ? 7 : 8); }
         $x = $pdf->GetX(); $y = $pdf->GetY();
         $pdf->SetFillColor(253, 226, 226); $pdf->Rect(10, $y, 190, $h_ex, 'F');
@@ -440,17 +440,15 @@ foreach ($itens as $item) {
         $pdf->SetXY($x, $y); $pdf->Cell($w[0], $linha_altura_base, $artigo, 0, 0, 'L');
         $pdf->SetXY($x + $w[0], $y); $pdf->MultiCell($w[1], $linha_altura_base, $desig, 0, 'J');
         $curX = $x + $w[0] + $w[1];
-        if ($qtd > 0) {
+        $larg_val = array_sum(array_slice($w, 4));
+        if ($qtd > 0 && $larg_val > 0) {
             $pdf->SetXY($curX, $y); $pdf->Cell($w[2], $linha_altura_base, pt(trim((string)$item['unidade'])), 0, 0, 'C');
             $pdf->SetXY($curX + $w[2], $y); $pdf->Cell($w[3], $linha_altura_base, number_format($qtd, 2, ',', '.'), 0, 0, 'C');
         }
-        $larg_val = array_sum(array_slice($w, 4));
-        if ($larg_val > 0) {
-            $pdf->SetFont('Arial', 'B', 8);
-            $pdf->SetXY($curX + $w[2] + $w[3], $y); $pdf->Cell($larg_val, $linha_altura_base, pt('EXCLUÍDO'), 0, 0, 'R');
-        }
-        $pdf->SetFont('Arial', 'I', 7);
-        $pdf->SetXY($x + $w[0], $y + $h); $pdf->Cell(190 - $w[0], 4, pt('Excluído desta proposta: não faz parte do fornecimento (ver «A proposta não inclui»).'), 0, 0, 'L');
+        // «EXCLUÍDO» à direita (no documento sem valores, no lugar da unidade / quantidade)
+        $pdf->SetFont('Arial', 'B', 8);
+        if ($larg_val > 0) { $pdf->SetXY($curX + $w[2] + $w[3], $y); $pdf->Cell($larg_val, $linha_altura_base, pt('EXCLUÍDO'), 0, 0, 'R'); }
+        else { $pdf->SetXY($curX, $y); $pdf->Cell($w[2] + $w[3], $linha_altura_base, pt('EXCLUÍDO'), 0, 0, 'R'); }
         $pdf->SetTextColor(0, 0, 0); $pdf->SetFont('Arial', '', ($is_gestao) ? 7 : 8);
         $pdf->SetY($y + $h_ex); $pdf->SetDrawColor(220, 220, 220); $pdf->Line(10, $pdf->GetY(), 200, $pdf->GetY()); $pdf->SetY($pdf->GetY() + 1);
         continue;
