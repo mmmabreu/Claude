@@ -1,6 +1,14 @@
 <?php
+// =====================================================================
+// TERMO SCIE (formulário)
+// Cada equipamento pode ser ligado a um artigo da TABELA DE PREÇOS (coluna "Artigo"): ao escolher, preenche a
+// descrição, a referência e a marca. Essa ligação é usada no PDF do termo para juntar, no fim, a ficha técnica e o
+// certificado de conformidade de cada produto instalado (termo_scie_dossier.php).
+// Sem ligação escolhida, ao gravar tenta-se ligar pela referência (se houver um só artigo com essa referência).
+// =====================================================================
 session_start();
 require_once 'db.php';
+require_once 'fichas_tecnicas_lib.php';
 
 // 🛡️ GARANTIR QUE A COLUNA NUMERO SUPORTA LETRAS E PONTOS (ex: 55a)
 try {
@@ -13,11 +21,25 @@ if (!isset($_SESSION['user_id'])) {
     exit; 
 }
 
-if (file_exists('functions.php')) { 
-    require_once 'functions.php'; 
-} else { 
-    function registrarLog($pdo, $acao, $modulo) { return true; } 
-}
+require_once 'functions.php';
+
+// Ligação dos equipamentos aos artigos da tabela de preços (e colunas dos certificados na biblioteca)
+try {
+    if (!$pdo->query("SHOW COLUMNS FROM termos_scie_items LIKE 'id_artigo_tabela'")->fetch())
+        $pdo->exec("ALTER TABLE termos_scie_items ADD COLUMN id_artigo_tabela INT NULL");
+} catch (Exception $e) {}
+ft_migrar($pdo);
+
+// Artigos da tabela de preços (com indicação de ficha técnica / certificado na biblioteca)
+$artigos_tab = [];
+try {
+    foreach ($pdo->query("SELECT t.id, t.referencia, t.descricao, t.marca, f.ficheiro AS f_fich, f.cert_ficheiro AS f_cert, f.marca AS f_marca
+                          FROM tabela_precos t LEFT JOIN fichas_tecnicas f ON f.id = t.id_ficha_tecnica AND f.ativo = 1
+                          ORDER BY t.descricao ASC")->fetchAll(PDO::FETCH_ASSOC) as $a) {
+        $artigos_tab[(int)$a['id']] = ['id' => (int)$a['id'], 'r' => trim((string)$a['referencia']), 'd' => trim((string)$a['descricao']),
+                                      'm' => trim((string)($a['marca'] ?: $a['f_marca'])), 'ft' => (string)$a['f_fich'] !== '' ? 1 : 0, 'ct' => (string)$a['f_cert'] !== '' ? 1 : 0];
+    }
+} catch (Exception $e) { error_log('termo_scie_form.php (artigos): ' . $e->getMessage()); }
 
 $perfil_user = $_SESSION['perfil'] ?? '';
 $is_admin = in_array($perfil_user, ['admin', 'administrativo']);
@@ -136,6 +158,8 @@ foreach ($all_items as $item) {
 // --- PROCESSAMENTO AJAX PARA GRAVAÇÃO (CRIAR/EDITAR) ---
 if (isset($_GET['ajax_save'])) {
     header('Content-Type: application/json');
+    // REGRA DE OURO 7: token CSRF
+    if (!validar_csrf_token($_POST['csrf_token'] ?? '')) { echo json_encode(['status' => 'error', 'message' => 'A sessão expirou. Atualize a página (os dados escritos perdem-se) ou copie-os antes.']); exit; }
     try {
         $pdo->beginTransaction();
         
@@ -201,18 +225,31 @@ if (isset($_GET['ajax_save'])) {
 
         // 3. GRAVAR OS EQUIPAMENTOS SCIE (a Central, se existir, vem primeiro com numero = 'C')
         $pdo->prepare("DELETE FROM termos_scie_items WHERE id_termo = ?")->execute([$termo_id_final]);
-        $sql_item = "INSERT INTO termos_scie_items (id_termo, numero, descricao, referencia, marca, n_serie, loop_eq, zona, endereco, localizacao, estado, obs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        $sql_item = "INSERT INTO termos_scie_items (id_termo, numero, descricao, referencia, marca, n_serie, loop_eq, zona, endereco, localizacao, estado, obs, id_artigo_tabela) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         $stmt_item = $pdo->prepare($sql_item);
-        
+
+        // Referência → artigo (só quando há um único artigo com essa referência)
+        $por_ref = [];
+        foreach ($artigos_tab as $a) {
+            $k = strtolower(preg_replace('/[^A-Za-z0-9]/', '', $a['r']));
+            if ($k === '') continue;
+            $por_ref[$k] = isset($por_ref[$k]) ? 0 : $a['id'];
+        }
         foreach ($itens as $eq) {
-            $stmt_item->execute([$termo_id_final, $eq['numero'], $eq['descricao'], $eq['referencia'], $eq['marca'], $eq['n_serie'], $eq['loop_eq'], $eq['zona'], $eq['endereco'], $eq['localizacao'], $eq['estado'], $eq['obs']]);
+            $id_art = (int)($eq['id_artigo_tabela'] ?? 0);
+            if (!isset($artigos_tab[$id_art])) {
+                $k = strtolower(preg_replace('/[^A-Za-z0-9]/', '', (string)($eq['referencia'] ?? '')));
+                $id_art = ($k !== '' && !empty($por_ref[$k])) ? $por_ref[$k] : 0;
+            }
+            $stmt_item->execute([$termo_id_final, $eq['numero'], $eq['descricao'], $eq['referencia'], $eq['marca'], $eq['n_serie'], $eq['loop_eq'], $eq['zona'], $eq['endereco'], $eq['localizacao'], $eq['estado'], $eq['obs'], $id_art ?: null]);
         }
         
         $pdo->commit();
         echo json_encode(['status' => 'success', 'termo_id' => $termo_id_final]);
     } catch(Exception $e) { 
         $pdo->rollBack(); 
-        echo json_encode(['status' => 'error', 'message' => $e->getMessage()]); 
+        if ($e instanceof PDOException) { error_log('termo_scie_form.php: ' . $e->getMessage()); echo json_encode(['status' => 'error', 'message' => 'Não foi possível gravar. Nada foi alterado.']); }
+        else echo json_encode(['status' => 'error', 'message' => $e->getMessage()]); 
     }
     exit;
 }
@@ -224,8 +261,11 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $modo_editar ? 'Editar' : 'Novo' ?> Termo SCIE - Gestão MAB</title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         /* PADRÃO VISUAL UNIFORMIZADO PREMIUM (SEM ÍCONES DE MENU) */
@@ -237,8 +277,12 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
         .topbar-center { display: flex; gap: 25px; flex: 1; }
         .topbar-right { display: flex; align-items: center; gap: 30px; }
         
-        .btn-back { color: #576574; text-decoration: none; font-weight: 500; display: flex; align-items: center; gap: 6px; font-size: 15px;}
-        .btn-back:hover { color: #b32a2a; } 
+        .btn-voltar { width: 40px; height: 40px; border-radius: 50%; background: #fff; border: 1px solid #e8ecf1; color: #576574; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; font-size: 16px; transition: all 0.2s ease; box-shadow: 0 2px 6px rgba(0,0,0,0.04); flex-shrink: 0; }
+        .btn-voltar:hover { background: #fdf2f2; color: #b32a2a; transform: translateX(-2px); }
+        .i-art { min-width: 190px; border-color: #d6eaf8 !important; background: #f8fbfe !important; }
+        tr.com-artigo .i-art { border-color: #82e0aa !important; background: #f0faf4 !important; }
+        .docs-art { display: block; font-size: 10px; margin-top: 2px; color: #95a5a6; white-space: nowrap; }
+        .docs-art .ok { color: #1e8449; font-weight: 700; } .docs-art .nao { color: #c0392b; }
         
         .user-menu { position: relative; display: inline-block; }
         .user-btn { background: none; border: none; font-size: 15px; font-weight: 600; color: #2c3e50; cursor: pointer; display: flex; align-items: center; gap: 8px; }
@@ -247,7 +291,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
         .dropdown-content { display: none; position: absolute; right: 0; top: 100%; margin-top: 10px; background: #fff; min-width: 180px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden; border: 1px solid #f1f2f6; z-index:200;}
         .dropdown-content a { color: #576574; padding: 12px 20px; text-decoration: none; display: block; font-size: 14px; }
         .dropdown-content a:hover { background: #fdf2f2; color: #b32a2a; }
-        .user-menu:hover .dropdown-content { display: block; }
+        .user-menu:hover .dropdown-content, .user-menu.aberto .dropdown-content { display: block; }
 
         .container { max-width: 1400px; margin: 30px auto; padding: 0 20px; }
         
@@ -310,7 +354,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
         .btn-opt:hover { filter: brightness(0.9); }
 
         @media (max-width: 768px) {
-            .btn-back-text { display: none; }
+            .user-nome { display: none; }
             .floating-action { bottom: 15px; right: 15px; left: 15px; justify-content: center; flex-wrap: wrap;}
             .btn-save { width: 100%; justify-content: center; }
         }
@@ -320,6 +364,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
 
     <datalist id="dl_desc"><?php foreach(array_keys($sugestoes['descricao']) as $v) echo "<option value='".htmlspecialchars($v)."'>"; ?></datalist>
     <datalist id="dl_dyn_ref"></datalist>
+    <datalist id="dl_artigos"></datalist>
     <datalist id="dl_tipo_ilum">
         <option value="Permanente">
         <option value="Não Permanente">
@@ -328,11 +373,11 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
     <header class="topbar">
         <div class="topbar-left"><a href="index.php"><img src="mab.png" alt="MAB" class="logo"></a></div>
         <div class="topbar-center"></div> <div class="topbar-right">
-            <a href="termos_scie.php" class="btn-back" title="Voltar"><i class="fa-solid fa-arrow-left"></i> <span class="btn-back-text">Voltar</span></a>
+            <a href="termos_scie.php" class="btn-voltar" title="Voltar" aria-label="Voltar"><i class="fa-solid fa-arrow-left"></i></a>
             <div class="user-menu">
-                <button class="user-btn">
+                <button type="button" class="user-btn">
                     <div class="user-avatar"><i class="fa-solid fa-user"></i></div>
-                    <?= htmlspecialchars($primeiro_nome) ?> 
+                    <span class="user-nome"><?= htmlspecialchars($primeiro_nome) ?></span> 
                     <i class="fa-solid fa-chevron-down" style="font-size: 10px;"></i>
                 </button>
                 <div class="dropdown-content">
@@ -357,6 +402,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
 
         <form id="formScie" onsubmit="event.preventDefault(); salvarTermo();">
             <input type="hidden" name="tipo_documento_real" value="<?= htmlspecialchars($tipo_documento_get) ?>">
+            <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
             <input type="hidden" name="itens_json" id="itens_json">
             <input type="hidden" name="obs_json" id="obs_json">
 
@@ -436,6 +482,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
                         <table>
                             <thead>
                                 <tr>
+                                    <th width="200" title="Artigo da tabela de preços (preenche descrição, referência e marca; liga a ficha técnica e o certificado)">Artigo (tabela de preços)</th>
                                     <th width="200">Descrição</th>
                                     <th width="120" class="text-center">Referência</th>
                                     <th width="120" class="text-center">Marca</th>
@@ -455,6 +502,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
                         <thead>
                             <tr>
                                 <th width="60" class="text-center">Nº</th>
+                                <th width="200" title="Artigo da tabela de preços (preenche descrição, referência e marca; liga a ficha técnica e o certificado)">Artigo (tabela de preços)</th>
                                 <th width="200">Descrição</th>
                                 <th width="120" class="text-center">Referência</th>
                                 <th width="120" class="text-center">Marca</th>
@@ -514,6 +562,46 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
         const saved_id_obra = "<?= htmlspecialchars($termo_data['id_obra'] ?? '') ?>";
         const tipoRelatorio = "<?= htmlspecialchars($tipo_documento_get) ?>";
 
+        // ---------- ARTIGOS DA TABELA DE PREÇOS ----------
+        const ARTIGOS = <?= json_encode(array_values($artigos_tab), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>;
+        const ART_ID = {}, ART_ROTULO = {};
+        (function () {
+            const dl = document.getElementById('dl_artigos'), frag = document.createDocumentFragment();
+            ARTIGOS.forEach(a => {
+                a.l = [a.r, a.d, a.m].filter(Boolean).join(' · ');
+                ART_ID[a.id] = a; ART_ROTULO[a.l] = a;
+                const o = document.createElement('option'); o.value = a.l; frag.appendChild(o);
+            });
+            dl.appendChild(frag);
+        })();
+        function rotuloArtigo(id) { const a = ART_ID[id]; return a ? a.l.replace(/"/g, '&quot;') : ''; }
+        // Mostra se o produto tem ficha técnica / certificado na biblioteca
+        function marcarArtigo(tr, id) {
+            const a = ART_ID[id];
+            tr.dataset.art = a ? a.id : '';
+            tr.classList.toggle('com-artigo', !!a);
+            const sp = tr.querySelector('.docs-art'); if (!sp) return;
+            sp.innerHTML = a ? '<span class="' + (a.ft ? 'ok' : 'nao') + '">' + (a.ft ? '✓' : '✗') + ' ficha</span> · <span class="' + (a.ct ? 'ok' : 'nao') + '">' + (a.ct ? '✓' : '✗') + ' certificado</span>' : '';
+        }
+        // Escolher um artigo preenche descrição, referência e marca
+        function escolherArtigo(inp) {
+            const tr = inp.closest('tr'), a = ART_ROTULO[inp.value];
+            if (!a) { if (inp.value !== '') inp.value = ''; marcarArtigo(tr, 0); return; }
+            if (a.d) tr.querySelector('.i-desc').value = a.d;
+            tr.querySelector('.i-ref').value = a.r || '';
+            if (a.m) tr.querySelector('.i-marca').value = a.m;
+            marcarArtigo(tr, a.id);
+            inp.title = a.l;
+            setTimeout(() => { inp.scrollLeft = 0; }, 0);   // mostra o início (referência) e não o fim do texto
+        }
+
+        // Menu do utilizador (toque em ecrãs táteis)
+        (function () {
+            const menu = document.querySelector('.user-menu'); if (!menu) return;
+            menu.querySelector('.user-btn').addEventListener('click', e => { e.stopPropagation(); menu.classList.toggle('aberto'); });
+            document.addEventListener('click', () => menu.classList.remove('aberto'));
+        })();
+
         // Tipos de documento que têm linha isolada para a Central de Incêndio
         const tiposComCentral = ['sadi'];
 
@@ -548,6 +636,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
             const tr = document.createElement('tr');
             const color = (d.estado === 'NOK') ? '#c0392b' : '#27ae60';
             tr.innerHTML = `
+                <td><input type="text" class="i-art" list="dl_artigos" placeholder="Procurar artigo..." value="${rotuloArtigo(d.id_artigo_tabela)}" onchange="escolherArtigo(this)"><span class="docs-art"></span></td>
                 <td><input type="text" class="i-desc" value="${d.descricao||''}" list="dl_desc" placeholder="Ex: Central de Deteção de Incêndio"></td>
                 <td><input type="text" class="i-ref text-center" value="${d.referencia||''}" list="dl_dyn_ref" onfocus="atualizarDatalistRef(this)" oninput="autoPreencherSmart(this)"></td>
                 <td><input type="text" class="i-marca text-center" value="${d.marca||''}"></td>
@@ -560,6 +649,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
                 <td><input type="text" class="i-obs" value="${d.obs||''}"></td>
             `;
             tbody.appendChild(tr);
+            marcarArtigo(tr, d.id_artigo_tabela);
         }
 
         // --- MOTOR CAMALEÃO: CONFIGURAÇÃO DE COLUNAS ---
@@ -726,6 +816,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
             // ATENÇÃO: O Campo do Número é agora editável. O OnBlur dispara o Auto-Healing!
             tr.innerHTML = `
                 <td><input type="text" class="i-n text-center" value="${d.numero||''}" style="font-weight:bold; color:#b32a2a; border: 1px solid transparent; background: transparent; transition:0.2s;" onfocus="this.style.border='1px solid #dcdde1'; this.style.background='#fff'" onblur="this.style.border='1px solid transparent'; this.style.background='transparent'; atualizarNumeracao();" title="Pode editar (Ex: 12.1)"></td>
+                <td><input type="text" class="i-art" list="dl_artigos" placeholder="Procurar artigo..." value="${rotuloArtigo(d.id_artigo_tabela)}" onchange="escolherArtigo(this)"><span class="docs-art"></span></td>
                 <td><input type="text" class="i-desc" value="${d.descricao||''}" list="dl_desc"></td>
                 <td><input type="text" class="i-ref text-center" value="${d.referencia||''}" list="dl_dyn_ref" onfocus="atualizarDatalistRef(this)" oninput="autoPreencherSmart(this)"></td>
                 <td><input type="text" class="i-marca text-center" value="${d.marca||''}"></td>
@@ -746,6 +837,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
             `;
             if (insertAfter) insertAfter.insertAdjacentElement('afterend', tr);
             else tbody.appendChild(tr);
+            marcarArtigo(tr, d.id_artigo_tabela);
             
             aplicarConfiguracaoColunas();
             if (!skipRenumber) atualizarNumeracao();
@@ -763,6 +855,7 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
             // A função 'atualizarNumeracao()' encarrega-se de o reescrever como 1,2,3,4,5...
             addRow({
                 numero: '',
+                id_artigo_tabela: tr.dataset.art || '',
                 descricao: tr.querySelector('.i-desc').value, 
                 referencia: tr.querySelector('.i-ref').value,
                 marca: tr.querySelector('.i-marca').value, 
@@ -869,7 +962,8 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
                         endereco: '',
                         localizacao: trCentral.querySelector('.i-loc').value,
                         estado: trCentral.querySelector('.i-st').value,
-                        obs: trCentral.querySelector('.i-obs').value
+                        obs: trCentral.querySelector('.i-obs').value,
+                        id_artigo_tabela: trCentral.dataset.art || ''
                     });
                 }
             }
@@ -910,7 +1004,8 @@ $obras = $pdo->query("SELECT id, id_cliente, nome as obra_nome, morada FROM obra
                         referencia: ref, marca: marca, n_serie: sn,
                         loop_eq: loop, zona: tr.querySelector('.i-z').value,
                         endereco: end, localizacao: tr.querySelector('.i-loc').value,
-                        estado: tr.querySelector('.i-st').value, obs: tr.querySelector('.i-obs').value
+                        estado: tr.querySelector('.i-st').value, obs: tr.querySelector('.i-obs').value,
+                        id_artigo_tabela: tr.dataset.art || ''
                     });
                 }
             });

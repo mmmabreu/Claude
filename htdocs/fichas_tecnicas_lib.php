@@ -1,11 +1,14 @@
 <?php
 /**
  * fichas_tecnicas_lib.php
- * Biblioteca de fichas técnicas (pasta fichas_tecnicas/) e ligação aos artigos da tabela de preços.
+ * Biblioteca de fichas técnicas e certificados de conformidade (pasta fichas_tecnicas/) e ligação aos artigos da
+ * tabela de preços. Cada registo é um produto (marca + modelo / referência) com ficha técnica e/ou certificado
+ * (nenhum dos dois é obrigatório, mas tem de haver pelo menos um).
  * Usado por fichas_tecnicas.php e, mais tarde, pela tabela de preços, orçamentos e FAME.
  *
  * Base de dados (criada / acrescentada automaticamente, sem mexer no que já existe):
- *   fichas_tecnicas  -> uma linha por ficha (marca, modelo, referência, ficheiro, versões anteriores)
+ *   fichas_tecnicas  -> uma linha por produto (marca, modelo, referência, ficha técnica + versões anteriores,
+ *                       certificado de conformidade + nº + validade + versões anteriores)
  *   tabela_precos    -> + coluna marca  + coluna id_ficha_tecnica
  */
 
@@ -32,6 +35,20 @@ function ft_migrar($pdo) {
             atualizado_em DATETIME NULL,
             INDEX (marca), INDEX (ativo)
         ) DEFAULT CHARSET=utf8mb4");
+    } catch (Exception $e) {}
+    // Certificado de conformidade (por produto: marca / referência)
+    try {
+        $novas = [
+            'cert_ficheiro'      => "VARCHAR(255) NOT NULL DEFAULT ''",
+            'cert_nome_original' => "VARCHAR(255) NOT NULL DEFAULT ''",
+            'cert_tamanho'       => "INT NOT NULL DEFAULT 0",
+            'cert_versoes_json'  => "MEDIUMTEXT NULL",
+            'cert_numero'        => "VARCHAR(100) NOT NULL DEFAULT ''",
+            'cert_validade'      => "DATE NULL",
+        ];
+        foreach ($novas as $col => $def) {
+            if (!$pdo->query("SHOW COLUMNS FROM fichas_tecnicas LIKE '$col'")->fetch()) $pdo->exec("ALTER TABLE fichas_tecnicas ADD COLUMN $col $def");
+        }
     } catch (Exception $e) {}
     try {
         if (!$pdo->query("SHOW COLUMNS FROM tabela_precos LIKE 'marca'")->fetch())
@@ -65,7 +82,7 @@ function ft_slug($txt, $max = 40) {
 }
 
 // Valida e grava um ficheiro enviado. Devolve [nome_gravado, nome_original, tamanho] ou lança Exception.
-function ft_guardar_upload(array $f, $marca, $modelo) {
+function ft_guardar_upload(array $f, $marca, $modelo, $prefixo = '') {
     if (($f['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
         $erros = [UPLOAD_ERR_INI_SIZE => 'é maior do que o servidor aceita', UPLOAD_ERR_FORM_SIZE => 'é demasiado grande',
                   UPLOAD_ERR_PARTIAL => 'chegou incompleto', UPLOAD_ERR_NO_FILE => 'não foi escolhido'];
@@ -83,7 +100,7 @@ function ft_guardar_upload(array $f, $marca, $modelo) {
     }
     if ($tipo === '') throw new Exception('O ficheiro «' . $f['name'] . '» não é PDF, JPG nem PNG.');
     if (!is_dir(FT_PASTA)) @mkdir(FT_PASTA, 0755, true);
-    $nome = ft_slug($marca, 25) . '_' . ft_slug($modelo !== '' ? $modelo : pathinfo($f['name'], PATHINFO_FILENAME), 45)
+    $nome = $prefixo . ft_slug($marca, 25) . '_' . ft_slug($modelo !== '' ? $modelo : pathinfo($f['name'], PATHINFO_FILENAME), 45)
           . '_' . date('ymd') . bin2hex(random_bytes(2)) . '.' . $tipo;
     if (!move_uploaded_file($f['tmp_name'], FT_PASTA . $nome)) throw new Exception('Não foi possível gravar «' . $f['name'] . '» na pasta ' . FT_PASTA . '.');
     return [$nome, mb_substr((string)$f['name'], 0, 255), (int)$f['size']];
@@ -98,6 +115,15 @@ function ft_tamanho_txt($b) {
     if ($b >= 1048576) return number_format($b / 1048576, 1, ',', '') . ' MB';
     if ($b >= 1024) return round($b / 1024) . ' KB';
     return $b . ' B';
+}
+
+// Estado do certificado: '' (sem certificado), 'valido', 'a_expirar' (≤ 60 dias) ou 'expirado'
+function ft_estado_certificado($f) {
+    if (empty($f['cert_ficheiro'])) return '';
+    if (empty($f['cert_validade'])) return 'valido';
+    $dias = (strtotime($f['cert_validade']) - strtotime(date('Y-m-d'))) / 86400;
+    if ($dias < 0) return 'expirado';
+    return $dias <= 60 ? 'a_expirar' : 'valido';
 }
 
 // Ficha ligada a um artigo da tabela de preços (para orçamentos / FAME)

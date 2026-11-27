@@ -1,11 +1,12 @@
 <?php
 /**
  * fichas_tecnicas.php
- * Biblioteca de fichas técnicas: carregar PDFs (um a um ou vários de uma vez), marca / modelo / referência,
- * substituir por versões novas (as antigas ficam guardadas) e ligar cada ficha aos artigos da tabela de preços.
+ * Biblioteca de fichas técnicas e certificados de conformidade: carregar PDFs (um a um ou vários de uma vez),
+ * marca / modelo / referência, substituir por versões novas (as antigas ficam guardadas) e ligar cada produto
+ * aos artigos da tabela de preços. Cada produto tem ficha técnica e/ou certificado (pelo menos um dos dois).
+ * O certificado tem nº e validade (opcionais): a lista avisa os que estão a expirar (60 dias) ou expirados.
  */
-ini_set('display_errors', 1);
-error_reporting(E_ALL);
+ini_set('display_errors', 0);
 
 session_start();
 require_once 'db.php';
@@ -70,6 +71,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $desc   = mb_substr(trim((string)($_POST['descricao'] ?? '')), 0, 255);
             if ($marca === '' || $modelo === '') throw new Exception('Indica a marca e o modelo.');
             $tem_fich = !empty($_FILES['ficheiro']['name']);
+            $tem_cert = !empty($_FILES['certificado']['name']);
+            $cert_num = mb_substr(trim((string)($_POST['cert_numero'] ?? '')), 0, 100);
+            $cert_val = preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($_POST['cert_validade'] ?? '')) ? $_POST['cert_validade'] : null;
             $artigos = json_decode((string)($_POST['artigos_json'] ?? '[]'), true);
             if (!is_array($artigos)) $artigos = [];
 
@@ -84,21 +88,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     // Nunca perder dados: a versão anterior fica guardada (ficheiro não é apagado)
                     if ($atual['ficheiro'] !== '') $versoes[] = ['ficheiro' => $atual['ficheiro'], 'nome_original' => $atual['nome_original'], 'tamanho' => (int)$atual['tamanho'], 'ate' => date('Y-m-d H:i:s')];
                 }
-                $pdo->prepare("UPDATE fichas_tecnicas SET marca=?, modelo=?, referencia=?, descricao=?, ficheiro=?, nome_original=?, tamanho=?, versoes_json=?, atualizado_em=NOW() WHERE id=?")
-                    ->execute([$marca, $modelo, $ref, $desc, $ficheiro, $nome_or, $tam, json_encode($versoes, JSON_UNESCAPED_UNICODE), $id_f]);
+                // Certificado de conformidade (a versão anterior também fica guardada, com o nº e a validade que tinha)
+                $c_fich = (string)$atual['cert_ficheiro']; $c_nome = (string)$atual['cert_nome_original']; $c_tam = (int)$atual['cert_tamanho'];
+                $c_versoes = json_decode((string)($atual['cert_versoes_json'] ?? ''), true) ?: [];
+                if ($tem_cert) {
+                    [$c_fich, $c_nome, $c_tam] = ft_guardar_upload($_FILES['certificado'], $marca, $modelo, 'cert_');
+                    if ($atual['cert_ficheiro'] !== '') $c_versoes[] = ['ficheiro' => $atual['cert_ficheiro'], 'nome_original' => $atual['cert_nome_original'], 'tamanho' => (int)$atual['cert_tamanho'],
+                                                                         'numero' => $atual['cert_numero'], 'validade' => $atual['cert_validade'], 'ate' => date('Y-m-d H:i:s')];
+                }
+                if ($ficheiro === '' && $c_fich === '') throw new Exception('Carrega a ficha técnica e/ou o certificado de conformidade.');
+                $pdo->prepare("UPDATE fichas_tecnicas SET marca=?, modelo=?, referencia=?, descricao=?, ficheiro=?, nome_original=?, tamanho=?, versoes_json=?,
+                               cert_ficheiro=?, cert_nome_original=?, cert_tamanho=?, cert_versoes_json=?, cert_numero=?, cert_validade=?, atualizado_em=NOW() WHERE id=?")
+                    ->execute([$marca, $modelo, $ref, $desc, $ficheiro, $nome_or, $tam, json_encode($versoes, JSON_UNESCAPED_UNICODE),
+                               $c_fich, $c_nome, $c_tam, json_encode($c_versoes, JSON_UNESCAPED_UNICODE), $cert_num, $cert_val, $id_f]);
                 ligar_artigos($pdo, $chave_art, $id_f, $artigos, $marca, !empty($_POST['marca_artigos']));
-                registrarLog($pdo, "Editou ficha técnica ($marca $modelo)" . ($tem_fich ? " - nova versão" : ''), "Fichas Técnicas");
-                voltar('Ficha «' . $marca . ' ' . $modelo . '» guardada' . ($tem_fich ? ' (a versão anterior ficou no histórico).' : '.'));
+                registrarLog($pdo, "Editou produto ($marca $modelo)" . ($tem_fich ? " - nova ficha" : '') . ($tem_cert ? " - novo certificado" : ''), "Fichas Técnicas");
+                voltar('«' . $marca . ' ' . $modelo . '» guardado' . (($tem_fich || $tem_cert) && ($atual['ficheiro'] !== '' || $atual['cert_ficheiro'] !== '') ? ' (as versões anteriores ficaram no histórico).' : '.'));
             } else {
-                if (!$tem_fich) throw new Exception('Escolhe o ficheiro da ficha técnica (PDF, JPG ou PNG).');
-                [$ficheiro, $nome_or, $tam] = ft_guardar_upload($_FILES['ficheiro'], $marca, $modelo);
-                $pdo->prepare("INSERT INTO fichas_tecnicas (marca, modelo, referencia, descricao, ficheiro, nome_original, tamanho, versoes_json, ativo, carregado_em, carregado_por, atualizado_em)
-                               VALUES (?,?,?,?,?,?,?,'[]',1,NOW(),?,NOW())")
-                    ->execute([$marca, $modelo, $ref, $desc, $ficheiro, $nome_or, $tam, $quem]);
+                if (!$tem_fich && !$tem_cert) throw new Exception('Escolhe a ficha técnica e/ou o certificado de conformidade (PDF, JPG ou PNG).');
+                [$ficheiro, $nome_or, $tam] = $tem_fich ? ft_guardar_upload($_FILES['ficheiro'], $marca, $modelo) : ['', '', 0];
+                [$c_fich, $c_nome, $c_tam] = $tem_cert ? ft_guardar_upload($_FILES['certificado'], $marca, $modelo, 'cert_') : ['', '', 0];
+                $pdo->prepare("INSERT INTO fichas_tecnicas (marca, modelo, referencia, descricao, ficheiro, nome_original, tamanho, versoes_json,
+                                   cert_ficheiro, cert_nome_original, cert_tamanho, cert_versoes_json, cert_numero, cert_validade, ativo, carregado_em, carregado_por, atualizado_em)
+                               VALUES (?,?,?,?,?,?,?,'[]',?,?,?,'[]',?,?,1,NOW(),?,NOW())")
+                    ->execute([$marca, $modelo, $ref, $desc, $ficheiro, $nome_or, $tam, $c_fich, $c_nome, $c_tam, $cert_num, $cert_val, $quem]);
                 $novo_id = (int)$pdo->lastInsertId();
                 ligar_artigos($pdo, $chave_art, $novo_id, $artigos, $marca, !empty($_POST['marca_artigos']));
-                registrarLog($pdo, "Carregou ficha técnica ($marca $modelo)", "Fichas Técnicas");
-                voltar('Ficha «' . $marca . ' ' . $modelo . '» carregada.');
+                registrarLog($pdo, "Carregou produto ($marca $modelo)" . ($tem_fich ? ' - ficha' : '') . ($tem_cert ? ' - certificado' : ''), "Fichas Técnicas");
+                voltar('«' . $marca . ' ' . $modelo . '» carregado.');
             }
         }
 
@@ -133,12 +150,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($acao === 'arquivar') {
                 $st_p = $pdo->prepare("SELECT valor FROM configuracoes WHERE chave = 'password_apagar' LIMIT 1"); $st_p->execute();
                 $pass_cfg = $st_p->fetchColumn();
-                if (($_POST['pass_seguranca'] ?? '') === '' || $_POST['pass_seguranca'] !== $pass_cfg) throw new Exception('Password de segurança incorreta.');
+                if (($_POST['pass_seguranca'] ?? '') === '' || !hash_equals((string)$pass_cfg, (string)$_POST['pass_seguranca'])) throw new Exception('Password de segurança incorreta.');
             }
             $pdo->prepare("UPDATE fichas_tecnicas SET ativo = ?, atualizado_em = NOW() WHERE id = ?")->execute([$acao === 'repor' ? 1 : 0, $id_f]);
             registrarLog($pdo, ($acao === 'repor' ? 'Repôs' : 'Arquivou') . " ficha técnica #$id_f", "Fichas Técnicas");
             voltar($acao === 'repor' ? 'Ficha reposta.' : 'Ficha arquivada (o ficheiro continua guardado; podes repô-la em «Arquivadas»).');
         }
+    } catch (PDOException $e) {
+        error_log('fichas_tecnicas.php: ' . $e->getMessage());
+        voltar('Não foi possível gravar. Nada foi alterado.', 'erro');
     } catch (Exception $e) {
         voltar($e->getMessage(), 'erro');
     }
@@ -163,6 +183,13 @@ ksort($marcas, SORT_NATURAL | SORT_FLAG_CASE);
 $n_ativas = count(array_filter($fichas, fn($f) => (int)$f['ativo'] === 1));
 $n_arquivadas = count($fichas) - $n_ativas;
 $n_art_ligados = count(array_filter($artigos, fn($a) => !empty($a['id_ficha_tecnica'])));
+$n_cert = 0; $n_cert_alerta = 0;
+foreach ($fichas as $f) {
+    if (!(int)$f['ativo']) continue;
+    $ec = ft_estado_certificado($f);
+    if ($ec !== '') $n_cert++;
+    if ($ec === 'a_expirar' || $ec === 'expirado') $n_cert_alerta++;
+}
 
 $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
 ?>
@@ -171,8 +198,10 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fichas Técnicas - MAB</title>
-    <link rel="icon" type="image/png" href="mab.png">
+    <title>Fichas Técnicas e Certificados - MAB</title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { font-family: system-ui, sans-serif; background: #f7f9fc; margin: 0; color: #333; font-size: 13px; padding-bottom: 60px; }
@@ -248,6 +277,13 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
         .ficheiro-atual { background: #f8f9fa; border: 1px solid #e1e5ea; border-radius: 8px; padding: 9px 12px; font-size: 12px; color: #2c3e50; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
         .ficheiro-atual a { color: #c0392b; font-weight: 700; text-decoration: none; }
         .versoes { font-size: 12px; color: #7f8c8d; margin-top: 6px; }
+        .doc-link { color: #c0392b; font-weight: 700; text-decoration: none; white-space: nowrap; }
+        .doc-link.cert { color: #2471a3; }
+        .doc-link:hover { text-decoration: underline; }
+        .falta-doc { color: #b2babb; font-style: italic; }
+        .val-valido { color: #1e8449; } .val-a_expirar { color: #d35400; font-weight: 700; } .val-expirado { color: #c0392b; font-weight: 700; }
+        .bloco-cert { border: 1px solid #d6eaf8; background: #f8fbfe; border-radius: 10px; padding: 12px; }
+        .bloco-cert h4 { margin: 0 0 10px; color: #2471a3; font-size: 13px; }
         .versoes a { color: #576574; }
 
         .bloco-art { margin-top: 16px; border-top: 1px solid #f1f2f6; padding-top: 14px; }
@@ -303,17 +339,19 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
         <?php if ($erro): ?><div class="alert alert-erro"><i class="fa-solid fa-triangle-exclamation"></i> <?= h($erro) ?></div><?php endif; ?>
 
         <div class="page-header">
-            <h1 class="page-title"><i class="fa-solid fa-book-open" style="color:#16a085;"></i> Fichas Técnicas</h1>
+            <h1 class="page-title"><i class="fa-solid fa-book-open" style="color:#16a085;"></i> Fichas Técnicas e Certificados</h1>
             <div class="acoes-topo">
                 <button type="button" class="btn btn-sec" onclick="abrirLote()"><i class="fa-solid fa-layer-group"></i> Carregar várias</button>
-                <button type="button" class="btn btn-verde" onclick="abrirFicha(0)"><i class="fa-solid fa-plus"></i> Nova ficha</button>
+                <button type="button" class="btn btn-verde" onclick="abrirFicha(0)"><i class="fa-solid fa-plus"></i> Novo produto</button>
             </div>
         </div>
 
         <div class="resumo">
             <div><b><?= $n_ativas ?></b><small>fichas</small></div>
             <div><b><?= count(array_filter($marcas)) ?></b><small>marcas</small></div>
-            <div><b><?= $n_art_ligados ?> / <?= count($artigos) ?></b><small>artigos com ficha</small></div>
+            <div><b><?= $n_art_ligados ?> / <?= count($artigos) ?></b><small>artigos ligados</small></div>
+            <div><b><?= $n_cert ?></b><small>com certificado</small></div>
+            <?php if ($n_cert_alerta): ?><div style="border-color:#f5b7b1;"><b style="color:#c0392b;"><?= $n_cert_alerta ?></b><small>certificado(s) a expirar / expirado(s)</small></div><?php endif; ?>
         </div>
 
         <div class="filtros">
@@ -327,21 +365,21 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
 
         <div class="card">
             <table id="tabFichas">
-                <thead><tr><th>Marca</th><th>Modelo / Referência</th><th>Ficheiro</th><th>Artigos</th><th style="text-align:right;">Ações</th></tr></thead>
+                <thead><tr><th>Marca</th><th>Modelo / Referência</th><th>Ficha técnica</th><th>Certificado de conformidade</th><th>Artigos</th><th style="text-align:right;">Ações</th></tr></thead>
                 <tbody>
                 <?php if (!$fichas): ?>
-                    <tr><td colspan="5" class="vazio">Ainda não há fichas técnicas. Começa por <strong>Carregar várias</strong> (uma marca de cada vez) ou <strong>Nova ficha</strong>.</td></tr>
+                    <tr><td colspan="6" class="vazio">Ainda não há fichas técnicas. Começa por <strong>Carregar várias</strong> (uma marca de cada vez) ou <strong>Nova ficha</strong>.</td></tr>
                 <?php endif; ?>
                 <?php foreach ($fichas as $f):
-                    $txt_pesq = mb_strtolower($f['marca'] . ' ' . $f['modelo'] . ' ' . $f['referencia'] . ' ' . $f['descricao'] . ' ' . $f['nome_original'], 'UTF-8');
+                    $txt_pesq = mb_strtolower($f['marca'] . ' ' . $f['modelo'] . ' ' . $f['referencia'] . ' ' . $f['descricao'] . ' ' . $f['nome_original'] . ' ' . $f['cert_numero'] . ' ' . $f['cert_nome_original'], 'UTF-8');
                 ?>
                     <tr class="<?= $f['ativo'] ? '' : 'arquivada' ?>" data-id="<?= (int)$f['id'] ?>" data-marca="<?= h($f['marca']) ?>" data-ativo="<?= (int)$f['ativo'] ?>" data-pesq="<?= h($txt_pesq) ?>" <?= $f['ativo'] ? '' : 'style="display:none;"' ?>>
                         <td><span class="marca-tag"><?= h($f['marca']) ?></span></td>
                         <td><div class="modelo"><?= h($f['modelo']) ?></div><?php if ($f['referencia'] !== '' || $f['descricao'] !== ''): ?><div class="sub"><?= h(trim($f['referencia'] . ($f['referencia'] !== '' && $f['descricao'] !== '' ? ' · ' : '') . $f['descricao'])) ?></div><?php endif; ?></td>
-                        <td class="sub"><?= h(strtoupper(pathinfo($f['ficheiro'], PATHINFO_EXTENSION))) ?> · <?= h(ft_tamanho_txt($f['tamanho'])) ?><?php $nv = count(json_decode((string)$f['versoes_json'], true) ?: []); if ($nv): ?> · <?= $nv ?> versão(ões) anterior(es)<?php endif; ?></td>
+                        <td class="sub" data-label="Ficha técnica"><?php if ($f['ficheiro'] !== ''): ?><a class="doc-link" href="<?= h(ft_url($f['ficheiro'])) ?>" target="_blank"><i class="fa-solid fa-file-pdf"></i> <?= h(strtoupper(pathinfo($f['ficheiro'], PATHINFO_EXTENSION))) ?></a> · <?= h(ft_tamanho_txt($f['tamanho'])) ?><?php $nv = count(json_decode((string)$f['versoes_json'], true) ?: []); if ($nv): ?> · <?= $nv ?> versão(ões) anterior(es)<?php endif; ?><?php else: ?><span class="falta-doc">sem ficha</span><?php endif; ?></td>
+                        <td class="sub" data-label="Certificado"><?php $ec = ft_estado_certificado($f); if ($ec !== ''): ?><a class="doc-link cert" href="<?= h(ft_url($f['cert_ficheiro'])) ?>" target="_blank"><i class="fa-solid fa-certificate"></i> <?= $f['cert_numero'] !== '' ? h($f['cert_numero']) : 'Certificado' ?></a><?php if ($f['cert_validade']): ?> · <span class="val-<?= $ec ?>"><?= $ec === 'expirado' ? 'expirou a ' : 'válido até ' ?><?= date('d/m/Y', strtotime($f['cert_validade'])) ?></span><?php endif; ?><?php else: ?><span class="falta-doc">sem certificado</span><?php endif; ?></td>
                         <td><span class="n-art <?= (int)$f['n_artigos'] ? '' : 'zero' ?>"><?= (int)$f['n_artigos'] ? (int)$f['n_artigos'] . ((int)$f['n_artigos'] === 1 ? ' artigo' : ' artigos') : 'sem artigos' ?></span></td>
                         <td class="acoes" style="text-align:right; white-space:nowrap;">
-                            <a class="btn-acao btn-ver" href="<?= h(ft_url($f['ficheiro'])) ?>" target="_blank" title="Abrir ficha"><i class="fa-solid fa-file-pdf"></i></a>
                             <button type="button" class="btn-acao" onclick="abrirFicha(<?= (int)$f['id'] ?>)" title="Editar / ligar artigos / nova versão"><i class="fa-solid fa-pen-to-square"></i></button>
                             <?php if ($f['ativo']): ?>
                                 <button type="button" class="btn-acao btn-arq" onclick="abrirArquivar(<?= (int)$f['id'] ?>, '<?= h(addslashes($f['marca'] . ' ' . $f['modelo'])) ?>')" title="Arquivar"><i class="fa-solid fa-box-archive"></i></button>
@@ -351,7 +389,7 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
                         </td>
                     </tr>
                 <?php endforeach; ?>
-                    <tr id="semResultados" style="display:none;"><td colspan="5" class="vazio">Nenhuma ficha corresponde à pesquisa.</td></tr>
+                    <tr id="semResultados" style="display:none;"><td colspan="6" class="vazio">Nenhuma ficha corresponde à pesquisa.</td></tr>
                 </tbody>
             </table>
         </div>
@@ -372,12 +410,24 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
                     <div class="fg"><label>Referência do fabricante</label><input type="text" name="referencia" id="f_ref" maxlength="100" placeholder="ex.: 863 22"></div>
                     <div class="fg"><label>Descrição (opcional)</label><input type="text" name="descricao" id="f_desc" maxlength="255"></div>
                     <div class="fg full">
-                        <label id="lblFicheiro">Ficheiro (PDF, JPG ou PNG · máx. 10 MB) *</label>
+                        <label id="lblFicheiro">Ficha técnica (PDF, JPG ou PNG · máx. 10 MB)</label>
                         <div class="ficheiro-atual" id="fichAtual" style="display:none;"></div>
                         <input type="file" name="ficheiro" id="f_ficheiro" accept="application/pdf,.pdf,image/jpeg,image/png">
                         <div class="versoes" id="fichVersoes"></div>
                     </div>
+                    <div class="fg full bloco-cert">
+                        <h4><i class="fa-solid fa-certificate"></i> Certificado de conformidade</h4>
+                        <div class="ficheiro-atual" id="certAtual" style="display:none;"></div>
+                        <label id="lblCert" style="margin-top:6px;">Ficheiro do certificado (PDF, JPG ou PNG · máx. 10 MB)</label>
+                        <input type="file" name="certificado" id="f_cert" accept="application/pdf,.pdf,image/jpeg,image/png">
+                        <div class="grid" style="margin-top:8px;">
+                            <div class="fg"><label>Nº do certificado</label><input type="text" name="cert_numero" id="f_cert_num" maxlength="100" placeholder="ex.: 0832-CPR-F0315"></div>
+                            <div class="fg"><label>Válido até</label><input type="date" name="cert_validade" id="f_cert_val"></div>
+                        </div>
+                        <div class="versoes" id="certVersoes"></div>
+                    </div>
                 </div>
+                <p class="ajuda" style="margin-top:8px;">Ficha técnica e/ou certificado: nenhum dos dois é obrigatório, mas tem de haver pelo menos um.</p>
 
                 <div class="bloco-art">
                     <h4><span><i class="fa-solid fa-link" style="color:#16a085;"></i> Artigos da tabela de preços com esta ficha</span><span id="nLigados" class="sub"></span></h4>
@@ -439,6 +489,9 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
         'id' => (int)$f['id'], 'marca' => $f['marca'], 'modelo' => $f['modelo'], 'referencia' => $f['referencia'], 'descricao' => $f['descricao'],
         'ficheiro' => $f['ficheiro'], 'url' => ft_url($f['ficheiro']), 'nome_original' => $f['nome_original'], 'tamanho' => ft_tamanho_txt($f['tamanho']),
         'versoes' => array_map(fn($v) => ['url' => ft_url($v['ficheiro'] ?? ''), 'nome' => $v['nome_original'] ?? '', 'ate' => $v['ate'] ?? ''], json_decode((string)$f['versoes_json'], true) ?: []),
+        'cert' => (string)$f['cert_ficheiro'], 'cert_url' => $f['cert_ficheiro'] !== '' ? ft_url($f['cert_ficheiro']) : '', 'cert_nome' => (string)$f['cert_nome_original'],
+        'cert_tamanho' => ft_tamanho_txt($f['cert_tamanho']), 'cert_numero' => (string)$f['cert_numero'], 'cert_validade' => (string)($f['cert_validade'] ?? ''),
+        'cert_versoes' => array_map(fn($v) => ['url' => ft_url($v['ficheiro'] ?? ''), 'nome' => $v['nome_original'] ?? '', 'ate' => $v['ate'] ?? '', 'numero' => $v['numero'] ?? ''], json_decode((string)($f['cert_versoes_json'] ?? ''), true) ?: []),
     ], $fichas), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS) ?>;
     const ARTIGOS = <?= json_encode(array_map(fn($a) => ['k' => (string)$a['k'], 'r' => (string)$a['referencia'], 'd' => (string)$a['descricao'], 'm' => (string)($a['marca'] ?? ''), 'f' => (int)($a['id_ficha_tecnica'] ?? 0)], $artigos), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS) ?>;
     const NOME_FICHA = {}; FICHAS.forEach(f => NOME_FICHA[f.id] = f.marca + ' ' + f.modelo);
@@ -482,11 +535,26 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
         document.getElementById('f_ref').value = f ? f.referencia : '';
         document.getElementById('f_desc').value = f ? f.descricao : '';
         document.getElementById('f_ficheiro').value = '';
-        document.getElementById('f_ficheiro').required = !f;
-        document.getElementById('tituloFicha').innerHTML = f ? '<i class="fa-solid fa-pen-to-square"></i> Editar ficha técnica' : '<i class="fa-solid fa-file-circle-plus"></i> Nova ficha técnica';
-        document.getElementById('lblFicheiro').textContent = f ? 'Substituir por uma versão nova (opcional · a atual fica no histórico)' : 'Ficheiro (PDF, JPG ou PNG · máx. 10 MB) *';
+        document.getElementById('f_ficheiro').required = false;
+        document.getElementById('f_cert').value = '';
+        document.getElementById('f_cert_num').value = f ? f.cert_numero : '';
+        document.getElementById('f_cert_val').value = f ? f.cert_validade : '';
+        const ca = document.getElementById('certAtual');
+        if (f && f.cert) {
+            ca.style.display = 'flex';
+            ca.innerHTML = '<i class="fa-solid fa-certificate" style="color:#2471a3;"></i> <a href="' + esc(f.cert_url) + '" target="_blank" style="color:#2471a3;">' + esc(f.cert_nome || f.cert) + '</a> <span class="sub">' + esc(f.cert_tamanho) + '</span>';
+            document.getElementById('lblCert').textContent = 'Substituir por um certificado novo (opcional · o atual fica no histórico)';
+        } else {
+            ca.style.display = 'none';
+            document.getElementById('lblCert').textContent = 'Ficheiro do certificado (PDF, JPG ou PNG · máx. 10 MB)';
+        }
+        document.getElementById('certVersoes').innerHTML = (f && f.cert_versoes.length)
+            ? 'Certificados anteriores: ' + f.cert_versoes.map((v, i) => '<a href="' + esc(v.url) + '" target="_blank">' + (i + 1) + '. ' + esc(v.numero || v.nome || 'certificado') + '</a>' + (v.ate ? ' <span>(até ' + esc(v.ate.substring(0, 10).split('-').reverse().join('/')) + ')</span>' : '')).join(' · ')
+            : '';
+        document.getElementById('tituloFicha').innerHTML = f ? '<i class="fa-solid fa-pen-to-square"></i> Editar produto' : '<i class="fa-solid fa-file-circle-plus"></i> Novo produto';
+        document.getElementById('lblFicheiro').textContent = (f && f.ficheiro) ? 'Ficha técnica — substituir por uma versão nova (opcional · a atual fica no histórico)' : 'Ficha técnica (PDF, JPG ou PNG · máx. 10 MB)';
         const at = document.getElementById('fichAtual');
-        if (f) {
+        if (f && f.ficheiro) {
             at.style.display = 'flex';
             at.innerHTML = '<i class="fa-solid fa-file-pdf" style="color:#c0392b;"></i> <a href="' + esc(f.url) + '" target="_blank">' + esc(f.nome_original || f.ficheiro) + '</a> <span class="sub">' + esc(f.tamanho) + '</span>';
         } else { at.style.display = 'none'; }
@@ -528,8 +596,11 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
             '<span class="chip">' + esc(a.r || a.d.substring(0, 30)) + '<button type="button" title="Desligar" data-k="' + esc(a.k) + '" onclick="marcarArtigo(this.dataset.k, false)">&times;</button></span>').join('');
     }
     function prepararFicha() {
-        const f = document.getElementById('f_ficheiro');
-        if (f.files[0] && f.files[0].size > 10 * 1024 * 1024) { alert('O ficheiro tem mais de 10 MB.'); return false; }
+        const f = document.getElementById('f_ficheiro'), c = document.getElementById('f_cert');
+        if (f.files[0] && f.files[0].size > 10 * 1024 * 1024) { alert('A ficha técnica tem mais de 10 MB.'); return false; }
+        if (c.files[0] && c.files[0].size > 10 * 1024 * 1024) { alert('O certificado tem mais de 10 MB.'); return false; }
+        const atual = FICHAS.find(x => x.id === fichaAtual);
+        if (!f.files[0] && !c.files[0] && !(atual && (atual.ficheiro || atual.cert))) { alert('Escolhe a ficha técnica e/ou o certificado de conformidade.'); return false; }
         document.getElementById('f_artigos').value = JSON.stringify(Array.from(ligados));
         return true;
     }

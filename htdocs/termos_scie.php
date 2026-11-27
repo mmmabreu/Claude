@@ -59,12 +59,25 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['btn_confirmar_apagar']
         $stmt_pass->execute();
         $pass_config = $stmt_pass->fetchColumn();
 
-        if ($pass_introduzida !== $pass_config || empty($pass_introduzida)) {
+        if (empty($pass_introduzida) || !hash_equals((string)$pass_config, (string)$pass_introduzida)) {
             $mensagem = "Password de segurança incorreta. Operação cancelada.";
             $tipo_mensagem = "erro";
         } else {
             try {
+                // NUNCA PERDER DADOS: cópia completa do termo e dos equipamentos antes de apagar
+                $pdo->exec("CREATE TABLE IF NOT EXISTS termos_scie_arquivo (
+                    id INT AUTO_INCREMENT PRIMARY KEY, id_termo INT NOT NULL, dados_json MEDIUMTEXT NOT NULL, itens_json MEDIUMTEXT NOT NULL,
+                    arquivado_por INT NULL, arquivado_em DATETIME NOT NULL, KEY idx_termo (id_termo)
+                ) DEFAULT CHARSET=utf8mb4");
+                $st_t = $pdo->prepare("SELECT * FROM termos_scie WHERE id = ?"); $st_t->execute([$id_apagar]);
+                $st_i = $pdo->prepare("SELECT * FROM termos_scie_items WHERE id_termo = ? ORDER BY id ASC"); $st_i->execute([$id_apagar]);
+                $dados_arq = $st_t->fetch(PDO::FETCH_ASSOC);
+
                 $pdo->beginTransaction();
+                if ($dados_arq) {
+                    $pdo->prepare("INSERT INTO termos_scie_arquivo (id_termo, dados_json, itens_json, arquivado_por, arquivado_em) VALUES (?, ?, ?, ?, NOW())")
+                        ->execute([$id_apagar, json_encode($dados_arq, JSON_UNESCAPED_UNICODE), json_encode($st_i->fetchAll(PDO::FETCH_ASSOC), JSON_UNESCAPED_UNICODE), $_SESSION['user_id']]);
+                }
                 
                 // 1. Apagar primeiro os itens para não deixar lixo na BD
                 $pdo->prepare("DELETE FROM termos_scie_items WHERE id_termo = ?")->execute([$id_apagar]);
@@ -79,7 +92,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['btn_confirmar_apagar']
                 exit;
             } catch (Exception $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
-                $mensagem = "Erro ao apagar documento: " . htmlspecialchars($e->getMessage());
+                error_log('termos_scie.php (apagar): ' . $e->getMessage());
+                $mensagem = "Não foi possível apagar o documento. Nada foi alterado.";
                 $tipo_mensagem = "erro";
             }
         }
@@ -246,8 +260,11 @@ function getCorValidade($data_limite) {
 <html lang="pt-PT">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Termos SCIE - Gestão MAB</title>
+    <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { font-family: system-ui, sans-serif; background: #f7f9fc; margin: 0; font-size: 13px; padding-bottom: 50px; }
@@ -394,7 +411,7 @@ function getCorValidade($data_limite) {
                             </td>
                             <td>
                                 <div class="acoes-container">
-                                    <a href="termo_scie_pdf.php?id=<?= $t['id'] ?>&doc=termo" target="_blank" class="btn-icon" title="Imprimir Termo de Responsabilidade" style="color:#b32a2a;"><i class="fa-solid fa-file-pdf"></i></a>
+                                    <a href="termo_scie_dossier.php?id=<?= (int)$t['id'] ?>" target="_blank" class="btn-icon" title="Imprimir Termo de Responsabilidade (com as fichas técnicas e os certificados dos produtos no fim)" style="color:#b32a2a;"><i class="fa-solid fa-file-pdf"></i></a>
                                     <a href="termo_scie_pdf.php?id=<?= $t['id'] ?>&doc=relatorio" target="_blank" class="btn-icon" title="Imprimir Relatório de Intervenção" style="color:#8e44ad;"><i class="fa-solid fa-file-pdf"></i></a>
                                     
                                     <a href="termo_scie_form.php?id=<?= $t['id'] ?>" class="btn-icon" title="Editar"><i class="fa-solid fa-pen-to-square"></i></a>
