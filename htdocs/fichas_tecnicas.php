@@ -4,7 +4,6 @@
  * Biblioteca de fichas técnicas e certificados de conformidade: carregar PDFs (um a um ou vários de uma vez),
  * marca / modelo / referência, substituir por versões novas (as antigas ficam guardadas) e ligar cada produto
  * aos artigos da tabela de preços. Cada produto tem ficha técnica e/ou certificado (pelo menos um dos dois).
- * O certificado tem nº e validade (opcionais): a lista avisa os que estão a expirar (60 dias) ou expirados.
  */
 ini_set('display_errors', 0);
 
@@ -72,8 +71,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($marca === '' || $modelo === '') throw new Exception('Indica a marca e o modelo.');
             $tem_fich = !empty($_FILES['ficheiro']['name']);
             $tem_cert = !empty($_FILES['certificado']['name']);
-            $cert_num = mb_substr(trim((string)($_POST['cert_numero'] ?? '')), 0, 100);
-            $cert_val = preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($_POST['cert_validade'] ?? '')) ? $_POST['cert_validade'] : null;
+            $cert_num = '';
+            $cert_val = null;
             $artigos = json_decode((string)($_POST['artigos_json'] ?? '[]'), true);
             if (!is_array($artigos)) $artigos = [];
 
@@ -97,6 +96,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                                                          'numero' => $atual['cert_numero'], 'validade' => $atual['cert_validade'], 'ate' => date('Y-m-d H:i:s')];
                 }
                 if ($ficheiro === '' && $c_fich === '') throw new Exception('Carrega a ficha técnica e/ou o certificado de conformidade.');
+                $cert_num = (string)$atual['cert_numero']; $cert_val = $atual['cert_validade'];   // dados antigos ficam guardados
                 $pdo->prepare("UPDATE fichas_tecnicas SET marca=?, modelo=?, referencia=?, descricao=?, ficheiro=?, nome_original=?, tamanho=?, versoes_json=?,
                                cert_ficheiro=?, cert_nome_original=?, cert_tamanho=?, cert_versoes_json=?, cert_numero=?, cert_validade=?, atualizado_em=NOW() WHERE id=?")
                     ->execute([$marca, $modelo, $ref, $desc, $ficheiro, $nome_or, $tam, json_encode($versoes, JSON_UNESCAPED_UNICODE),
@@ -351,7 +351,6 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
             <div><b><?= count(array_filter($marcas)) ?></b><small>marcas</small></div>
             <div><b><?= $n_art_ligados ?> / <?= count($artigos) ?></b><small>artigos ligados</small></div>
             <div><b><?= $n_cert ?></b><small>com certificado</small></div>
-            <?php if ($n_cert_alerta): ?><div style="border-color:#f5b7b1;"><b style="color:#c0392b;"><?= $n_cert_alerta ?></b><small>certificado(s) a expirar / expirado(s)</small></div><?php endif; ?>
         </div>
 
         <div class="filtros">
@@ -377,7 +376,7 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
                         <td><span class="marca-tag"><?= h($f['marca']) ?></span></td>
                         <td><div class="modelo"><?= h($f['modelo']) ?></div><?php if ($f['referencia'] !== '' || $f['descricao'] !== ''): ?><div class="sub"><?= h(trim($f['referencia'] . ($f['referencia'] !== '' && $f['descricao'] !== '' ? ' · ' : '') . $f['descricao'])) ?></div><?php endif; ?></td>
                         <td class="sub" data-label="Ficha técnica"><?php if ($f['ficheiro'] !== ''): ?><a class="doc-link" href="<?= h(ft_url($f['ficheiro'])) ?>" target="_blank"><i class="fa-solid fa-file-pdf"></i> <?= h(strtoupper(pathinfo($f['ficheiro'], PATHINFO_EXTENSION))) ?></a> · <?= h(ft_tamanho_txt($f['tamanho'])) ?><?php $nv = count(json_decode((string)$f['versoes_json'], true) ?: []); if ($nv): ?> · <?= $nv ?> versão(ões) anterior(es)<?php endif; ?><?php else: ?><span class="falta-doc">sem ficha</span><?php endif; ?></td>
-                        <td class="sub" data-label="Certificado"><?php $ec = ft_estado_certificado($f); if ($ec !== ''): ?><a class="doc-link cert" href="<?= h(ft_url($f['cert_ficheiro'])) ?>" target="_blank"><i class="fa-solid fa-certificate"></i> <?= $f['cert_numero'] !== '' ? h($f['cert_numero']) : 'Certificado' ?></a><?php if ($f['cert_validade']): ?> · <span class="val-<?= $ec ?>"><?= $ec === 'expirado' ? 'expirou a ' : 'válido até ' ?><?= date('d/m/Y', strtotime($f['cert_validade'])) ?></span><?php endif; ?><?php else: ?><span class="falta-doc">sem certificado</span><?php endif; ?></td>
+                        <td class="sub" data-label="Certificado"><?php $ec = ft_estado_certificado($f); if ($ec !== ''): ?><a class="doc-link cert" href="<?= h(ft_url($f['cert_ficheiro'])) ?>" target="_blank"><i class="fa-solid fa-certificate"></i> <?= h(strtoupper(pathinfo($f['cert_ficheiro'], PATHINFO_EXTENSION))) ?></a> · <?= h(ft_tamanho_txt($f['cert_tamanho'])) ?><?php else: ?><span class="falta-doc">sem certificado</span><?php endif; ?></td>
                         <td><span class="n-art <?= (int)$f['n_artigos'] ? '' : 'zero' ?>"><?= (int)$f['n_artigos'] ? (int)$f['n_artigos'] . ((int)$f['n_artigos'] === 1 ? ' artigo' : ' artigos') : 'sem artigos' ?></span></td>
                         <td class="acoes" style="text-align:right; white-space:nowrap;">
                             <button type="button" class="btn-acao" onclick="abrirFicha(<?= (int)$f['id'] ?>)" title="Editar / ligar artigos / nova versão"><i class="fa-solid fa-pen-to-square"></i></button>
@@ -420,10 +419,6 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
                         <div class="ficheiro-atual" id="certAtual" style="display:none;"></div>
                         <label id="lblCert" style="margin-top:6px;">Ficheiro do certificado (PDF, JPG ou PNG · máx. 10 MB)</label>
                         <input type="file" name="certificado" id="f_cert" accept="application/pdf,.pdf,image/jpeg,image/png">
-                        <div class="grid" style="margin-top:8px;">
-                            <div class="fg"><label>Nº do certificado</label><input type="text" name="cert_numero" id="f_cert_num" maxlength="100" placeholder="ex.: 0832-CPR-F0315"></div>
-                            <div class="fg"><label>Válido até</label><input type="date" name="cert_validade" id="f_cert_val"></div>
-                        </div>
                         <div class="versoes" id="certVersoes"></div>
                     </div>
                 </div>
@@ -537,8 +532,6 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
         document.getElementById('f_ficheiro').value = '';
         document.getElementById('f_ficheiro').required = false;
         document.getElementById('f_cert').value = '';
-        document.getElementById('f_cert_num').value = f ? f.cert_numero : '';
-        document.getElementById('f_cert_val').value = f ? f.cert_validade : '';
         const ca = document.getElementById('certAtual');
         if (f && f.cert) {
             ca.style.display = 'flex';
@@ -549,7 +542,7 @@ $msg = $_GET['ok'] ?? ''; $erro = $_GET['erro'] ?? '';
             document.getElementById('lblCert').textContent = 'Ficheiro do certificado (PDF, JPG ou PNG · máx. 10 MB)';
         }
         document.getElementById('certVersoes').innerHTML = (f && f.cert_versoes.length)
-            ? 'Certificados anteriores: ' + f.cert_versoes.map((v, i) => '<a href="' + esc(v.url) + '" target="_blank">' + (i + 1) + '. ' + esc(v.numero || v.nome || 'certificado') + '</a>' + (v.ate ? ' <span>(até ' + esc(v.ate.substring(0, 10).split('-').reverse().join('/')) + ')</span>' : '')).join(' · ')
+            ? 'Certificados anteriores: ' + f.cert_versoes.map((v, i) => '<a href="' + esc(v.url) + '" target="_blank">' + (i + 1) + '. ' + esc(v.nome || 'certificado') + '</a>' + (v.ate ? ' <span>(até ' + esc(v.ate.substring(0, 10).split('-').reverse().join('/')) + ')</span>' : '')).join(' · ')
             : '';
         document.getElementById('tituloFicha').innerHTML = f ? '<i class="fa-solid fa-pen-to-square"></i> Editar produto' : '<i class="fa-solid fa-file-circle-plus"></i> Novo produto';
         document.getElementById('lblFicheiro').textContent = (f && f.ficheiro) ? 'Ficha técnica — substituir por uma versão nova (opcional · a atual fica no histórico)' : 'Ficha técnica (PDF, JPG ou PNG · máx. 10 MB)';

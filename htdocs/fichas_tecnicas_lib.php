@@ -8,7 +8,7 @@
  *
  * Base de dados (criada / acrescentada automaticamente, sem mexer no que já existe):
  *   fichas_tecnicas  -> uma linha por produto (marca, modelo, referência, ficha técnica + versões anteriores,
- *                       certificado de conformidade + nº + validade + versões anteriores)
+ *                       certificado de conformidade + versões anteriores)
  *   tabela_precos    -> + coluna marca  + coluna id_ficha_tecnica
  */
 
@@ -117,13 +117,9 @@ function ft_tamanho_txt($b) {
     return $b . ' B';
 }
 
-// Estado do certificado: '' (sem certificado), 'valido', 'a_expirar' (≤ 60 dias) ou 'expirado'
+// Estado do certificado: '' (sem certificado) ou 'valido' (o nº e a validade deixaram de ser pedidos)
 function ft_estado_certificado($f) {
-    if (empty($f['cert_ficheiro'])) return '';
-    if (empty($f['cert_validade'])) return 'valido';
-    $dias = (strtotime($f['cert_validade']) - strtotime(date('Y-m-d'))) / 86400;
-    if ($dias < 0) return 'expirado';
-    return $dias <= 60 ? 'a_expirar' : 'valido';
+    return empty($f['cert_ficheiro']) ? '' : 'valido';
 }
 
 // Ficha ligada a um artigo da tabela de preços (para orçamentos / FAME)
