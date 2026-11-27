@@ -182,7 +182,12 @@ function linhasAuto($lista, $suplementar, $fmt) {
     <?php /* REGRA DE OURO 8: ícone MAB no separador */ ?>
     <link rel="icon" type="image/png" href="/mab.png">
     <link rel="apple-touch-icon" href="/mab.png">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Folha A4 horizontal, definida antes de tudo (não depende de nenhum ficheiro externo) -->
+    <style>
+        @page { size: 297mm 210mm; margin: 0; }
+    </style>
+    <!-- Ícones só para os botões do ecrã: media="screen" para não interferirem com a impressão -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" media="screen">
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -300,10 +305,7 @@ function linhasAuto($lista, $suplementar, $fmt) {
 
         /* OTIMIZAÇÕES DE IMPRESSÃO (A4 Horizontal) */
         @media print {
-            @page { 
-                size: A4 landscape; 
-                margin: 0; 
-            }
+            @page { size: 297mm 210mm; margin: 0; }
             body { 
                 background: #fff !important; 
                 padding: 0 10mm; 
