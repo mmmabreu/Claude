@@ -72,6 +72,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $limpos[] = [$ident, mb_substr(trim((string)($p['localizacao'] ?? '')), 0, 150), mb_substr(trim((string)($p['painel_porta'] ?? '')), 0, 60),
                          mb_substr(trim((string)($p['categoria'] ?? '')), 0, 20), mb_substr(trim((string)($p['configuracao'] ?? '')), 0, 30),
                          $num($p['comprimento'] ?? ''), ($p['mapa'] ?? 'OK') === 'NOK' ? 'NOK' : 'OK', $num($p['margem_next'] ?? ''),
+                         $num($p['return_loss'] ?? ''), $num($p['insertion_loss'] ?? ''), $num($p['atraso_ns'] ?? ''),
                          ($p['resultado'] ?? 'PASSA') === 'FALHA' ? 'FALHA' : 'PASSA', mb_substr(trim((string)($p['observacoes'] ?? '')), 0, 255)];
         }
 
@@ -87,8 +88,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ->execute(array_merge(array_values($campos), [$_SESSION['user_id']]));
             $id = (int)$pdo->lastInsertId();
         }
-        $ins = $pdo->prepare("INSERT INTO termos_ited_pontos (id_termo, ordem, identificacao, localizacao, painel_porta, categoria, configuracao, comprimento, mapa, margem_next, resultado, observacoes)
-                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        $ins = $pdo->prepare("INSERT INTO termos_ited_pontos (id_termo, ordem, identificacao, localizacao, painel_porta, categoria, configuracao, comprimento, mapa, margem_next, return_loss, insertion_loss, atraso_ns, resultado, observacoes)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
         foreach ($limpos as $i => $p) $ins->execute(array_merge([$id, $i + 1], $p));
         $pdo->commit();
         // Técnico e equipamento de ensaio ficam para os termos seguintes
@@ -122,7 +123,7 @@ $t = $termo ?: [
 ];
 // Equipamento de ensaio: sempre pré-preenchido com o certificador da empresa (nos termos antigos, se estiver vazio)
 foreach ($ITED_EQUIPAMENTO as $k => $v) if (trim((string)($t[$k] ?? '')) === '') $t[$k] = $v;
-$pontos = ($id && empty($_POST)) ? itedPontos($pdo, $id) : (isset($limpos) ? array_map(fn($p) => array_combine(['identificacao', 'localizacao', 'painel_porta', 'categoria', 'configuracao', 'comprimento', 'mapa', 'margem_next', 'resultado', 'observacoes'], $p), $limpos) : []);
+$pontos = ($id && empty($_POST)) ? itedPontos($pdo, $id) : (isset($limpos) ? array_map(fn($p) => array_combine(['identificacao', 'localizacao', 'painel_porta', 'categoria', 'configuracao', 'comprimento', 'mapa', 'margem_next', 'return_loss', 'insertion_loss', 'atraso_ns', 'resultado', 'observacoes'], $p), $limpos) : []);
 $cabos = itedCabosTabela($pdo);
 $e = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
 $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP;
@@ -176,7 +177,8 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
         .resumo-pontos { font-size: 13px; color: #576574; margin-bottom: 10px; }
         .resumo-pontos b { color: #2c3e50; } .resumo-pontos .f { color: #c0392b; } .resumo-pontos .ok { color: #1e8449; }
         .table-responsive { width: 100%; overflow-x: auto; }
-        table.pontos { width: 100%; border-collapse: collapse; min-width: 1100px; }
+        table.pontos { width: 100%; border-collapse: collapse; min-width: 1450px; }
+        table.pontos .med { width: 82px; }
         table.pontos th { padding: 8px 6px; text-align: left; font-size: 10px; text-transform: uppercase; color: #95a5a6; border-bottom: 1px solid #e1e5ea; background: #fafbfc; white-space: nowrap; }
         table.pontos td { padding: 4px 4px; border-bottom: 1px solid #f2f3f5; }
         table.pontos input, table.pontos select { width: 100%; padding: 7px 8px; border: 1px solid #e1e5ea; border-radius: 6px; font-size: 13px; background: #fff; }
@@ -202,7 +204,8 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
             table.pontos, table.pontos tbody, table.pontos tr, table.pontos td { display: block; width: 100%; }
             table.pontos tr { border: 1px solid #e1e5ea; border-radius: 10px; margin-bottom: 10px; padding: 6px 0; background: #fff; display: grid; grid-template-columns: 1fr 1fr; }
             table.pontos td { border: none; padding: 3px 10px; }
-            table.pontos td:nth-child(1), table.pontos td:nth-child(3), table.pontos td:nth-child(11), table.pontos td:nth-child(12) { grid-column: 1 / -1; }
+            table.pontos td:nth-child(1), table.pontos td:nth-child(3), table.pontos td:nth-child(14), table.pontos td:nth-child(15) { grid-column: 1 / -1; }
+            table.pontos .med { width: auto; }
             table.pontos td[data-label]::before { content: attr(data-label); display: block; font-size: 10px; font-weight: 700; color: #95a5a6; text-transform: uppercase; margin-bottom: 2px; }
             table.pontos .n { text-align: left; width: auto; }
             .rodape .btn { flex: 1; justify-content: center; }
@@ -314,11 +317,11 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
                 <div class="resumo-pontos" id="resumoPontos"></div>
                 <div class="table-responsive">
                     <table class="pontos">
-                        <thead><tr><th>Nº</th><th>Identificação</th><th>Localização</th><th>Painel / porta</th><th>Categoria</th><th>Configuração</th><th>Compr. (m)</th><th>Mapa</th><th>Margem NEXT (dB)</th><th>Resultado</th><th>Observações</th><th></th></tr></thead>
+                        <thead><tr><th>Nº</th><th>Identificação</th><th>Localização</th><th>Painel / porta</th><th>Categoria</th><th>Configuração</th><th>Compr. (m)</th><th>Mapa</th><th class="med" title="Margem NEXT (paradiafonia)">NEXT (dB)</th><th class="med" title="Return Loss — perda de retorno">Return Loss (dB)</th><th class="med" title="Insertion Loss — atenuação">Insertion Loss (dB)</th><th class="med" title="Atraso de propagação">Atraso prop. (ns)</th><th>Resultado</th><th>Observações</th><th></th></tr></thead>
                         <tbody id="corpoPontos"></tbody>
                     </table>
                 </div>
-                <p class="ajuda">CSV do certificador (ex.: exportação do LinkWare) ou feito à mão: o importador reconhece colunas como <em>Cable ID / Identificação, Local, Porta, Categoria, Length / Comprimento, Wiremap / Mapa, NEXT Margin / Margem, Result / Resultado</em>.</p>
+                <p class="ajuda">CSV do certificador (ex.: exportação do LinkWare) ou feito à mão: o importador reconhece colunas como <em>Cable ID / Identificação, Local, Porta, Categoria, Length / Comprimento, Wiremap / Mapa, NEXT Margin / Margem, Return Loss, Insertion Loss / Atenuação, Prop. Delay / Atraso, Result / Resultado</em>.</p>
             </div>
 
             <div class="card">
@@ -456,6 +459,9 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
             + '<td data-label="Comprimento (m)"><input class="p-comp" inputmode="decimal" value="' + esc(numPT(d.comprimento)) + '"></td>'
             + '<td data-label="Mapa de cablagem"><select class="p-mapa">' + opts(['OK', 'NOK'], d.mapa || 'OK') + '</select></td>'
             + '<td data-label="Margem NEXT (dB)"><input class="p-next" inputmode="decimal" value="' + esc(numPT(d.margem_next)) + '"></td>'
+            + '<td data-label="Return Loss (dB)"><input class="p-rl" inputmode="decimal" value="' + esc(numPT(d.return_loss)) + '"></td>'
+            + '<td data-label="Insertion Loss / atenuação (dB)"><input class="p-il" inputmode="decimal" value="' + esc(numPT(d.insertion_loss)) + '"></td>'
+            + '<td data-label="Atraso de propagação (ns)"><input class="p-atr" inputmode="decimal" value="' + esc(numPT(d.atraso_ns)) + '"></td>'
             + '<td data-label="Resultado"><select class="p-res sel-res">' + opts(['PASSA', 'FALHA'], d.resultado || 'PASSA') + '</select></td>'
             + '<td data-label="Observações"><input class="p-obs" maxlength="255" value="' + esc(d.observacoes) + '"></td>'
             + '<td><div class="acao-l"><button type="button" class="btn-l" title="Duplicar (número seguinte)" onclick="duplicar(this)"><i class="fa-solid fa-copy"></i></button>'
@@ -475,12 +481,13 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
     function linha(tr) {
         const q = s => tr.querySelector(s).value.trim();
         return { identificacao: q('.p-id'), localizacao: q('.p-loc'), painel_porta: q('.p-painel'), categoria: q('.p-cat'), configuracao: q('.p-conf'),
-                 comprimento: q('.p-comp').replace(',', '.'), mapa: q('.p-mapa'), margem_next: q('.p-next').replace(',', '.'), resultado: q('.p-res'), observacoes: q('.p-obs') };
+                 comprimento: q('.p-comp').replace(',', '.'), mapa: q('.p-mapa'), margem_next: q('.p-next').replace(',', '.'),
+                 return_loss: q('.p-rl').replace(',', '.'), insertion_loss: q('.p-il').replace(',', '.'), atraso_ns: q('.p-atr').replace(',', '.'), resultado: q('.p-res'), observacoes: q('.p-obs') };
     }
     function duplicar(btn) {
         const tr = btn.closest('tr'), d = linha(tr);
         d.identificacao = seguinte(d.identificacao); d.painel_porta = seguinte(d.painel_porta);
-        d.comprimento = ''; d.margem_next = ''; d.observacoes = ''; d.mapa = 'OK'; d.resultado = 'PASSA';
+        d.comprimento = ''; d.margem_next = ''; d.return_loss = ''; d.insertion_loss = ''; d.atraso_ns = ''; d.observacoes = ''; d.mapa = 'OK'; d.resultado = 'PASSA';
         addPonto(d, tr).querySelector('.p-id').focus();
     }
     function atualizar() {
@@ -531,6 +538,8 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
             const C = { id: col(['cableid', 'idcabo', 'identificacao', 'tomada', 'ponto', 'id', 'name', 'nome']), loc: col(['local', 'localizacao', 'location', 'divisao']),
                         painel: col(['painel', 'porta', 'port', 'patch']), cat: col(['categoria', 'category', 'cat']), conf: col(['configuracao', 'testtype', 'tipoensaio', 'linktype']),
                         comp: col(['length', 'comprimento', 'compr']), mapa: col(['wiremap', 'mapa']), next: col(['nextmargin', 'worstnext', 'margemnext', 'margem', 'next']),
+                        rl: col(['returnloss', 'worstrl', 'rlmargin', 'perdaderetorno', 'rl']), il: col(['insertionloss', 'atenuacao', 'attenuation', 'il']),
+                        atr: col(['propdelay', 'propagationdelay', 'atrasodepropagacao', 'atraso', 'delay']),
                         res: col(['result', 'resultado', 'summary', 'status', 'passfail']), obs: col(['obs', 'observacoes', 'comment', 'notas']) };
             if (C.id < 0) { alert('Não encontrei a coluna da identificação do ponto (ex.: "Cable ID" ou "Identificação").'); return; }
             const num = v => { const m = String(v || '').replace(',', '.').match(/-?\d+(\.\d+)?/); return m ? m[0] : ''; };
@@ -543,7 +552,7 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
                 let cat = g(C.cat); const mc = cat.match(/(5e|6a|6|7a|7|8)/i); cat = mc ? 'Cat. ' + mc[1].toUpperCase().replace('E', 'e') : '';
                 const conf = /channel|canal/i.test(g(C.conf)) ? 'Canal' : (g(C.conf) ? 'Ligação permanente' : '');
                 addPonto({ identificacao: g(C.id), localizacao: g(C.loc), painel_porta: g(C.painel), categoria: cat, configuracao: conf,
-                           comprimento: num(g(C.comp)), mapa: C.mapa >= 0 ? (passa(g(C.mapa)) ? 'OK' : 'NOK') : 'OK', margem_next: num(g(C.next)),
+                           comprimento: num(g(C.comp)), mapa: C.mapa >= 0 ? (passa(g(C.mapa)) ? 'OK' : 'NOK') : 'OK', margem_next: num(g(C.next)), return_loss: num(g(C.rl)), insertion_loss: num(g(C.il)), atraso_ns: num(g(C.atr)),
                            resultado: C.res >= 0 ? (passa(g(C.res)) ? 'PASSA' : 'FALHA') : 'PASSA', observacoes: g(C.obs) });
                 n++;
             });

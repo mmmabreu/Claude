@@ -6,7 +6,8 @@
 // Cada registo ITED tem dois documentos:
 //   - Termo de responsabilidade de execução da instalação ITED (Manual ITED 4.ª ed. / DL 123/2009 na redação atual)
 //   - Relatório de ensaios / certificação dos pontos RJ45 (um ponto por linha: identificação, local, painel/porta,
-//     categoria, configuração do ensaio, comprimento, mapa de cablagem, margem NEXT e resultado)
+//     categoria, configuração do ensaio, comprimento, mapa de cablagem, margem NEXT, return loss (dB),
+//     insertion loss / atenuação (dB), atraso de propagação (ns) e resultado)
 //
 // Base de dados (criada automaticamente):
 //   termos_ited          -> dados do termo (obra, edifício, projeto, técnico, equipamento de ensaio, texto do termo)
@@ -79,10 +80,17 @@ function itedCriarTabelas($pdo) {
         comprimento DECIMAL(8,2) NULL,
         mapa VARCHAR(5) NOT NULL DEFAULT 'OK',
         margem_next DECIMAL(6,2) NULL,
+        return_loss DECIMAL(6,2) NULL,
+        insertion_loss DECIMAL(6,2) NULL,
+        atraso_ns DECIMAL(8,1) NULL,
         resultado VARCHAR(10) NOT NULL DEFAULT 'PASSA',
         observacoes VARCHAR(255) NOT NULL DEFAULT '',
         KEY idx_termo (id_termo)
     ) DEFAULT CHARSET=utf8mb4");
+    // Medições acrescentadas depois (tabelas já criadas)
+    foreach (['return_loss' => 'DECIMAL(6,2) NULL', 'insertion_loss' => 'DECIMAL(6,2) NULL', 'atraso_ns' => 'DECIMAL(8,1) NULL'] as $col => $def) {
+        if (!$pdo->query("SHOW COLUMNS FROM termos_ited_pontos LIKE '$col'")->fetch()) $pdo->exec("ALTER TABLE termos_ited_pontos ADD COLUMN $col $def AFTER margem_next");
+    }
     $pdo->exec("CREATE TABLE IF NOT EXISTS termos_ited_arquivo (
         id INT AUTO_INCREMENT PRIMARY KEY,
         id_termo INT NOT NULL,

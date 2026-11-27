@@ -110,6 +110,7 @@ if ($doc === 'termo') {
     else
         $pdf->Pares([['Projeto ITED:', 'Sem projeto ITED']]);
     $pdf->Pares([['Técnico ITED:', $t['tecnico_nome']], ['Inscrição ANACOM:', $t['tecnico_inscricao']]]);
+    if (trim((string)($t['cabo_texto'] ?? '')) !== '') $pdf->Pares([['Cabo instalado:', $t['cabo_texto']]]);
     $pdf->Ln(8);
 
     $texto = trim((string)$t['texto_termo']) !== '' ? $t['texto_termo'] : itedTextoPadrao($t);
@@ -147,9 +148,9 @@ if ($doc === 'termo') {
         . ($cmax !== null ? ' · comprimento máximo ' . number_format($cmax, 1, ',', '') . ' m · médio ' . number_format($cmed, 1, ',', '') . ' m' : '')), 0, 1, 'L');
     $pdf->Ln(1);
 
-    // Nº | Identificação | Localização | Painel/porta | Categoria | Configuração | Compr. | Mapa | Margem NEXT | Resultado | Observações  (= 277 mm)
-    $w = [9, 26, 46, 26, 18, 30, 18, 14, 26, 20, 44];
-    $tit = ['Nº', 'Identificação', 'Localização', 'Painel / porta', 'Categoria', 'Configuração', 'Compr. (m)', 'Mapa', 'Margem NEXT (dB)', 'Resultado', 'Observações'];
+    // Nº | Identificação | Localização | Painel/porta | Categoria | Configuração | Compr. | Mapa | NEXT | RL | IL | Atraso | Resultado | Observações  (= 277 mm)
+    $w = [8, 24, 34, 22, 15, 26, 15, 11, 17, 17, 17, 16, 17, 38];
+    $tit = ['Nº', 'Identificação', 'Localização', 'Painel / porta', 'Categoria', 'Configuração', 'Compr. (m)', 'Mapa', 'NEXT (dB)', 'RL (dB)', 'IL (dB)', 'Atraso (ns)', 'Resultado', 'Observações'];
     $cab = function () use ($pdf, $w, $tit) {
         $pdf->SetFont('Arial', 'B', 7.5); $pdf->SetFillColor(241, 242, 246); $pdf->SetDrawColor(200, 200, 200);
         foreach ($tit as $i => $tt) $pdf->Cell($w[$i], 7, pt($tt), 1, 0, 'C', true);
@@ -159,11 +160,15 @@ if ($doc === 'termo') {
     $lh = 4.5;
     foreach ($pontos as $i => $p) {
         $pdf->SetFont('Arial', '', 8);
-        $vals = [(string)($i + 1), $p['identificacao'], $p['localizacao'], $p['painel_porta'], $p['categoria'], $p['configuracao'],
+        $vals = [(string)($i + 1), $p['identificacao'], $p['localizacao'], $p['painel_porta'], $p['categoria'], str_replace('Ligação permanente', 'Lig. permanente', (string)$p['configuracao']),
                  $p['comprimento'] !== null ? number_format((float)$p['comprimento'], 1, ',', '') : '-', $p['mapa'],
-                 $p['margem_next'] !== null ? number_format((float)$p['margem_next'], 1, ',', '') : '-', $p['resultado'], $p['observacoes']];
+                 $p['margem_next'] !== null ? number_format((float)$p['margem_next'], 1, ',', '') : '-',
+                 isset($p['return_loss']) && $p['return_loss'] !== null ? number_format((float)$p['return_loss'], 1, ',', '') : '-',
+                 isset($p['insertion_loss']) && $p['insertion_loss'] !== null ? number_format((float)$p['insertion_loss'], 1, ',', '') : '-',
+                 isset($p['atraso_ns']) && $p['atraso_ns'] !== null ? number_format((float)$p['atraso_ns'], 0, ',', '') : '-',
+                 $p['resultado'], $p['observacoes']];
         $nl = 1;
-        foreach ([1, 2, 3, 10] as $c) $nl = max($nl, $pdf->NbLines($w[$c], pt($vals[$c])));
+        foreach ([1, 2, 3, 5, 13] as $c) $nl = max($nl, $pdf->NbLines($w[$c], pt($vals[$c])));
         $h = $nl * $lh + 2;
         if ($pdf->GetY() + $h > 188) { $pdf->AddPage(); $cab(); $pdf->SetFont('Arial', '', 8); }
         $x = 10; $y = $pdf->GetY();
@@ -172,14 +177,17 @@ if ($doc === 'termo') {
         foreach ($vals as $c => $v) {
             $pdf->Rect($x, $y, $w[$c], $h);
             $pdf->SetXY($x, $y + 1);
-            if ($c === 9 || $c === 7) { $pdf->SetFont('Arial', 'B', 8); $bom = ($c === 9 ? $v === 'PASSA' : $v === 'OK'); $pdf->SetTextColor($bom ? 30 : 192, $bom ? 132 : 57, $bom ? 73 : 43); }
-            $pdf->MultiCell($w[$c], $lh, pt($v), 0, in_array($c, [1, 2, 3, 10]) ? 'L' : 'C');
+            if ($c === 12 || $c === 7) { $pdf->SetFont('Arial', 'B', 8); $bom = ($c === 12 ? $v === 'PASSA' : $v === 'OK'); $pdf->SetTextColor($bom ? 30 : 192, $bom ? 132 : 57, $bom ? 73 : 43); }
+            $pdf->MultiCell($w[$c], $lh, pt($v), 0, in_array($c, [1, 2, 3, 13]) ? 'L' : 'C');
             $pdf->SetTextColor(0, 0, 0); $pdf->SetFont('Arial', '', 8);
             $x += $w[$c];
         }
         $pdf->SetXY(10, $y + $h);
     }
     if (!$pontos) { $pdf->SetFont('Arial', 'I', 9); $pdf->Cell(array_sum($w), 8, pt('Sem pontos registados.'), 1, 1, 'C'); }
+    $pdf->SetFont('Arial', '', 7); $pdf->SetTextColor(110, 110, 110);
+    $pdf->Cell(0, 5, pt('NEXT = margem de paradiafonia · RL = Return Loss (perda de retorno) · IL = Insertion Loss (atenuação) · Atraso = atraso de propagação'), 0, 1, 'L');
+    $pdf->SetTextColor(0, 0, 0);
 
     // Conclusão, observações e assinatura
     if ($pdf->GetY() + 55 > 195) $pdf->AddPage();
