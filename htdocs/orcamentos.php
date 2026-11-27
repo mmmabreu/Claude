@@ -199,6 +199,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['btn_confirmar_duplica
                     $t_mo = $it['tempo_mao_obra'] ?? 0;
                     $m_bloq = $it['margem_bloqueada'] ?? 0;
                     $stmt_ins_item->execute([$novo_id, $tipo_l, $it['artigo'], $it['designacao'], $it['unidade'], $it['quantidade'], $it['preco_unitario_custo'], $t_mo, $it['valor_custo'], $it['preco_unitario_venda'], $it['valor_venda'], $m_bloq]);
+                    // A cópia mantém a ligação à tabela de preços, a composição e a exclusão da linha
+                    $extra = array_intersect_key($it, array_flip(['id_artigo_tabela', 'composicao_json', 'excluida']));
+                    if ($extra) {
+                        try {
+                            $novo_item = $pdo->lastInsertId();
+                            $sets = implode(', ', array_map(fn($k) => "$k = ?", array_keys($extra)));
+                            $pdo->prepare("UPDATE orcamento_itens SET $sets WHERE id = ?")->execute(array_merge(array_values($extra), [$novo_item]));
+                        } catch (Exception $e_x) {}
+                    }
                 }
             }
 

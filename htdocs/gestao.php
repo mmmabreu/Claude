@@ -231,9 +231,15 @@ if ($obra_selecionada) {
                 // tempo_mao_obra é por unidade e em MINUTOS (como na tabela de preços), por isso multiplica-se
                 // pela quantidade da linha e divide-se por 60
                 try {
-                    $stmt_horas_orc = $pdo->prepare("SELECT SUM(COALESCE(quantidade, 0) * COALESCE(tempo_mao_obra, 0)) FROM orcamento_itens WHERE orcamento_id = ?");
+                    // Linhas excluídas do orçamento (não são da especialidade) não contam
+                    $stmt_horas_orc = $pdo->prepare("SELECT * FROM orcamento_itens WHERE orcamento_id = ?");
                     $stmt_horas_orc->execute([$orc_row['id']]);
-                    $horas_orcamentadas = (float)$stmt_horas_orc->fetchColumn() / 60;   // minutos → horas
+                    $min_orc = 0;
+                    foreach ($stmt_horas_orc->fetchAll(PDO::FETCH_ASSOC) as $l_h) {
+                        if (!empty($l_h['excluida'])) continue;
+                        $min_orc += (float)($l_h['quantidade'] ?? 0) * (float)($l_h['tempo_mao_obra'] ?? 0);
+                    }
+                    $horas_orcamentadas = $min_orc / 60;   // minutos → horas
                 } catch (Exception $e) {
                     $horas_orcamentadas = 0;
                 }

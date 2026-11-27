@@ -163,6 +163,10 @@ try {
     // Composição da linha (vários artigos da tabela de preços numa só linha do orçamento)
     if (!$pdo->query("SHOW COLUMNS FROM orcamento_itens LIKE 'composicao_json'")->fetch())
         $pdo->exec("ALTER TABLE orcamento_itens ADD COLUMN composicao_json TEXT NULL");
+    // Linha excluída (não é da especialidade): fica no orçamento, assinalada, mas não conta em nada
+    // (totais, PDF, material, FAME, autos, gestão) e a designação vai para «A proposta não inclui»
+    if (!$pdo->query("SHOW COLUMNS FROM orcamento_itens LIKE 'excluida'")->fetch())
+        $pdo->exec("ALTER TABLE orcamento_itens ADD COLUMN excluida TINYINT(1) NOT NULL DEFAULT 0");
 } catch (Exception $e) {}
 
 // --- CARREGAR TABELA DE PREÇOS ---
@@ -478,6 +482,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $tem_comercial_post = false;
 
         foreach ($itens_post as $item) {
+            if (!empty($item['excluida'])) continue;
             if (($item['tipo_linha'] ?? 'Interno') === 'Comercial' && trim($item['designacao'] ?? '') !== '') {
                 $tem_comercial_post = true;
             }
@@ -489,6 +494,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $art = $item['artigo'] ?? '';
                 $q_str = $item['quantidade'] ?? '';
                 $tipo_l = $item['tipo_linha'] ?? 'Interno';
+                if (!empty($item['excluida'])) continue;   // linha excluída: não conta nos totais
 
                 if (trim($desig) !== '' || trim($art) !== '' || trim($q_str) !== '') {
                     $q = limparNumero($q_str);
@@ -665,6 +671,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     // Artigo da tabela de preços escolhido nesta linha
                     $id_art_tab = (int)($item['id_artigo_tabela'] ?? 0);
                     $id_linha_nova = $pdo->lastInsertId();
+                    if (!empty($item['excluida'])) {
+                        try { $pdo->prepare("UPDATE orcamento_itens SET excluida = 1 WHERE id = ?")->execute([$id_linha_nova]); } catch (Exception $e) {}
+                    }
                     if ($id_art_tab > 0) {
                         try { $pdo->prepare("UPDATE orcamento_itens SET id_artigo_tabela = ? WHERE id = ?")->execute([$id_art_tab, $id_linha_nova]); } catch (Exception $e) {}
                     }
@@ -1008,7 +1017,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
         .col-unidade { width: 7.5ch; }
         .col-qtd { width: 12ch; }
         .col-valor { width: 14ch; }
-        .col-del { width: 75px; text-align: center; }
+        .col-del { width: 104px; text-align: center; white-space: nowrap; }
 
         .items-table input[type="text"], .items-table textarea, .list-row textarea { width: 100%; box-sizing: border-box; padding: 3px 8px; font-size: 14px; line-height: 1.3; border: 1px solid transparent; border-radius: 6px; background: transparent; transition: all 0.2s ease;}
         .items-table input[type="text"]:hover, .items-table textarea:hover { border-color: #e2e8f0; background: #f8fafc; }
@@ -1037,6 +1046,14 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
         .btn-clear:hover { background: #f1f5f9; color: var(--red); border-color: #fecaca;}
 
         .btn-row-action { background: none; border: none; cursor: pointer; font-size: 15px; padding: 3px; border-radius: 6px; transition: all 0.2s; display: inline-flex; align-items: center; justify-content: center;}
+        .btn-excl-row { color: #94a3b8; margin-right: 4px; }
+        .btn-excl-row:hover { background: #fff7ed; color: #ea580c; }
+        tr.linha-excluida .btn-excl-row { color: #ea580c; background: #fff7ed; }
+        tr.linha-excluida td { background: #fafafa !important; }
+        tr.linha-excluida input, tr.linha-excluida textarea { text-decoration: line-through; color: #94a3b8 !important; background: transparent !important; }
+        tr.linha-excluida .col-designacao { position: relative; }
+        tr.linha-excluida .desig-input { padding-bottom: 14px !important; }
+        tr.linha-excluida .col-designacao::after { content: "EXCLUÍDA · vai para «Não inclui»"; position: absolute; left: 14px; bottom: 3px; font-size: 9px; font-weight: 800; color: #ea580c; letter-spacing: .03em; pointer-events: none; }
         .btn-del-row { color: #f87171; }
         .btn-del-row:hover { background: #fef2f2; color: #dc2626; }
         .btn-add-row { color: #34d399; margin-right: 4px;}
@@ -2271,6 +2288,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                         designacao: desig,
                         unidade: un,
                         quantidade: qty,
+                        excluida: linhaExcluida(row) ? 1 : 0,
                         preco_unitario_venda: pv
                     });
                     copiadas++;
@@ -2550,6 +2568,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             let safePV = escapeHTML(data.preco_unitario_venda || '');
             let safeMB = escapeHTML(data.margem_bloqueada || '0');
             let safeIdArt = escapeHTML(String(parseInt(data.id_artigo_tabela || 0, 10) || ''));
+            let safeExcl = (data.excluida == 1 || data.excluida === true || data.excluida === '1') ? '1' : '0';
             let safeComp = escapeHTML(typeof data.composicao_json === 'string' ? data.composicao_json : (data.composicao_json ? JSON.stringify(data.composicao_json) : ''));
 
             if (tipo === 'interno') {
@@ -2578,7 +2597,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                     <td class="col-valor"><input type="text" class="v_custo align-center" readonly style="background:transparent; border:none; font-weight:700; color:var(--gray);"></td>
                     <td class="col-valor" style="position:relative;"><input type="hidden" name="margem_bloqueada[]" class="margem-bloqueada-input" value="${safeMB}"><input type="text" name="preco_unitario_venda[]" class="pv align-center" oninput="forceComma(this); calcular(this);" onblur="formatField(this)" value="${safePV}" style="font-weight:bold;">${lockIcon}</td>
                     <td class="col-valor"><input type="text" class="total_v align-right" readonly style="background:transparent; border:none; font-weight:800; color:var(--dark); font-size:15px;"></td>
-                    <td class="col-del"><button type="button" class="btn-row-action btn-add-row" onclick="insertRowAfter('interno', this)"><i class="fa-solid fa-plus"></i></button><button type="button" class="btn-row-action btn-del-row" onclick="this.closest('tr').remove(); calcularTudo();"><i class="fa-solid fa-trash-can"></i></button></td>
+                    <td class="col-del"><button type="button" class="btn-row-action btn-add-row" onclick="insertRowAfter('interno', this)" title="Acrescentar linha"><i class="fa-solid fa-plus"></i></button><button type="button" class="btn-row-action btn-excl-row" onclick="alternarExclusao(this)" title="Excluir esta linha (não é da especialidade): passa para «A proposta não inclui»"><i class="fa-solid fa-ban"></i></button><button type="button" class="btn-row-action btn-del-row" onclick="apagarLinhaOrc(this)" title="Apagar linha"><i class="fa-solid fa-trash-can"></i></button><input type="hidden" class="excl-flag" value="${safeExcl}"></td>
                     <input type="hidden" name="tipo_linha_real[]" class="tipo-linha-indicator" value="Interno">
                     <input type="hidden" class="id-art-tab" value="${safeIdArt}">
                     <input type="hidden" class="comp-json" value="${safeComp}">
@@ -2601,7 +2620,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                     <td class="col-qtd"><input type="text" name="quantidade[]" class="qty align-center" oninput="forceComma(this); calcular(this)" onblur="formatField(this)" value="${linhaNova ? '1,00' : safeQtd}" style="font-weight:bold;"></td>
                     <td class="col-valor"><input type="text" name="preco_unitario_venda[]" class="pv align-center" oninput="forceComma(this); calcular(this);" onblur="formatField(this)" value="${safePV}" style="font-weight:bold;"></td>
                     <td class="col-valor"><input type="text" class="total_v align-right" readonly style="background:transparent; border:none; font-weight:800; color:var(--dark); font-size:15px;"></td>
-                    <td class="col-del"><button type="button" class="btn-row-action btn-add-row" onclick="insertRowAfter('comercial', this)"><i class="fa-solid fa-plus"></i></button><button type="button" class="btn-row-action btn-del-row" onclick="this.closest('tr').remove(); calcularTudo();"><i class="fa-solid fa-trash-can"></i></button></td>
+                    <td class="col-del"><button type="button" class="btn-row-action btn-add-row" onclick="insertRowAfter('comercial', this)" title="Acrescentar linha"><i class="fa-solid fa-plus"></i></button><button type="button" class="btn-row-action btn-excl-row" onclick="alternarExclusao(this)" title="Excluir esta linha (não é da especialidade): passa para «A proposta não inclui»"><i class="fa-solid fa-ban"></i></button><button type="button" class="btn-row-action btn-del-row" onclick="apagarLinhaOrc(this)" title="Apagar linha"><i class="fa-solid fa-trash-can"></i></button><input type="hidden" class="excl-flag" value="${safeExcl}"></td>
                     <input type="hidden" name="preco_unitario_custo[]" class="p_custo" value="0">
                     <input type="hidden" name="tempo_mao_obra[]" class="t_mo" value="0">
                     <input type="hidden" name="margem_bloqueada[]" class="margem-bloqueada-input" value="0">
@@ -2754,6 +2773,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
         function addRow(tipo, data = {}) {
             const tbody = document.querySelector(tipo === 'interno' ? '#tabelaItensInterno tbody' : '#tabelaItensComercial tbody');
             const row = tbody.insertRow(); row.innerHTML = getRowHTML(tipo, data);
+            marcarExclusao(row);
             marcarFicha(row);
             const ta = row.querySelector('.desig-input');
             if(ta && data.designacao) { autoAjustarTextarea(ta); }
@@ -2891,11 +2911,64 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             return h + 'h ' + String(m).padStart(2, '0') + 'm';
         }
 
+        // ---------- EXCLUIR LINHA (não é da especialidade) ----------
+        // A linha fica no orçamento, riscada, não conta em nada e a designação vai para «A proposta não inclui».
+        function linhaExcluida(r) { return !!(r && r.classList && r.classList.contains('linha-excluida')); }
+        function marcarExclusao(row) {
+            const f = row.querySelector('.excl-flag');
+            const ex = !!(f && f.value === '1');
+            row.classList.toggle('linha-excluida', ex);
+            const b = row.querySelector('.btn-excl-row');
+            if (b) b.title = ex ? 'Voltar a incluir esta linha (sai de «A proposta não inclui»)' : 'Excluir esta linha (não é da especialidade): passa para «A proposta não inclui»';
+        }
+        function textoNaoInclui(row) {
+            return ((row.querySelector('.desig-input') || {}).value || '').replace(/\s+/g, ' ').trim();
+        }
+        function camposNaoInclui() { return [...document.querySelectorAll('#naoIncluiContainer [name="nao_inclui_linha[]"], #naoIncluiContainer [name="nao_inclui_linha"]')]; }
+        function acrescentarNaoInclui(texto) {
+            if (!texto) return;
+            const campos = camposNaoInclui();
+            if (campos.some(c => c.value.trim().toLowerCase() === texto.toLowerCase())) return;   // já lá está
+            const vazio = campos.find(c => c.value.trim() === '');
+            if (vazio) { vazio.value = texto; if (typeof autoAjustarTextarea === 'function' && vazio.tagName === 'TEXTAREA') autoAjustarTextarea(vazio); return; }
+            addListRow('naoIncluiContainer', 'nao_inclui_linha', texto);
+        }
+        function retirarNaoInclui(texto) {
+            if (!texto) return;
+            const c = camposNaoInclui().find(x => x.value.trim().toLowerCase() === texto.toLowerCase());
+            if (!c) return;
+            const linha = c.closest('.list-row');
+            if (linha && camposNaoInclui().length > 1) linha.remove(); else c.value = '';
+        }
+        function alternarExclusao(btn) {
+            const row = btn.closest('tr'); if (!row) return;
+            const f = row.querySelector('.excl-flag'); if (!f) return;
+            const texto = textoNaoInclui(row);
+            if (f.value !== '1') {
+                if (!texto) { alert('Escreva primeiro a designação da linha (é o texto que vai para «A proposta não inclui»).'); return; }
+                f.value = '1';
+                acrescentarNaoInclui(texto);
+            } else {
+                f.value = '0';
+                retirarNaoInclui(texto);
+            }
+            marcarExclusao(row);
+            calcularTotalMaoDeObra();
+            calcularTudo();
+        }
+        function apagarLinhaOrc(btn) {
+            const row = btn.closest('tr'); if (!row) return;
+            if (linhaExcluida(row)) retirarNaoInclui(textoNaoInclui(row));
+            row.remove();
+            calcularTotalMaoDeObra();
+            calcularTudo();
+        }
+
         function calcularTotalMaoDeObra() {
             let sMoMinutos = 0;
             document.querySelectorAll('#tabelaItensInterno tbody tr').forEach(r => {
                 let qInput = r.querySelector('.qty'); let tMoInput = r.querySelector('.t_mo');
-                if(!qInput || !tMoInput) return;
+                if(!qInput || !tMoInput || linhaExcluida(r)) return;
                 let qty = strToNum(qInput.value);
                 let tMo = strToNum(tMoInput.value);
                 if (qty > 0 && tMo > 0) { sMoMinutos += (qty * tMo); }
@@ -2909,7 +2982,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             let sC = 0, sV_interno = 0;
             document.querySelectorAll('#tabelaItensInterno tbody tr').forEach(r => {
                 let qInput = r.querySelector('.qty'); let pcInput = r.querySelector('.p_custo'); let pvInput = r.querySelector('.pv');
-                if(!qInput || !pcInput || !pvInput) return;
+                if(!qInput || !pcInput || !pvInput || linhaExcluida(r)) return;
                 sC += strToNum(qInput.value) * strToNum(pcInput.value);
                 sV_interno += strToNum(qInput.value) * strToNum(pvInput.value);
             });
@@ -2917,7 +2990,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             let sV_comercial = 0; let temComercial = false;
             document.querySelectorAll('#tabelaItensComercial tbody tr').forEach(r => {
                 let desigInput = r.querySelector('.desig-input'); let qInput = r.querySelector('.qty'); let pvInput = r.querySelector('.pv');
-                if(!desigInput || !qInput || !pvInput) return;
+                if(!desigInput || !qInput || !pvInput || linhaExcluida(r)) return;
                 let desig = desigInput.value.trim();
                 if (desig !== '') {
                     temComercial = true;
@@ -2994,7 +3067,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             const linhas = [];
             document.querySelectorAll('#tabelaItensInterno tbody tr, #tabelaItensComercial tbody tr').forEach(row => {
                 const pv = row.querySelector('.pv');
-                if (!pv || pv.value.trim() === '') return;                       // títulos e linhas sem preço
+                if (!pv || pv.value.trim() === '' || linhaExcluida(row)) return;  // títulos, linhas sem preço e excluídas
                 const mb = row.querySelector('.margem-bloqueada-input');
                 if (mb && mb.value === '1') return;                               // margem bloqueada (Tabela de Preços)
                 linhas.push(pv);
@@ -3065,7 +3138,8 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                         preco_unitario_venda: (row.querySelector('.pv') || {}).value || '0',
                         margem_bloqueada: (row.querySelector('.margem-bloqueada-input') || {}).value || '0',
                         id_artigo_tabela: (row.querySelector('.id-art-tab') || {}).value || '',
-                        composicao_json: (row.querySelector('.comp-json') || {}).value || ''
+                        composicao_json: (row.querySelector('.comp-json') || {}).value || '',
+                        excluida: linhaExcluida(row) ? 1 : 0
                     });
                 }
             });
@@ -3085,7 +3159,8 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
                         preco_unitario_custo: '0',
                         tempo_mao_obra: '0',
                         preco_unitario_venda: (row.querySelector('.pv') || {}).value || '0',
-                        margem_bloqueada: '0'
+                        margem_bloqueada: '0',
+                        excluida: linhaExcluida(row) ? 1 : 0
                     });
                 }
             });
@@ -3157,7 +3232,7 @@ $nao_inclui_finais = isset($_POST['nao_inclui_linha']) ? $_POST['nao_inclui_linh
             let hasPrecoInferior = false;
             document.querySelectorAll('#tabelaItensInterno tbody tr').forEach(row => {
                 let pcInput = row.querySelector('.p_custo'); let pvInput = row.querySelector('.pv'); let qInput = row.querySelector('.qty');
-                if(!pcInput || !pvInput || !qInput) return;
+                if(!pcInput || !pvInput || !qInput || linhaExcluida(row)) return;
                 let pc = strToNum(pcInput.value); let pv = strToNum(pvInput.value); let q = strToNum(qInput.value);
                 if (q > 0 && pv < pc) { hasPrecoInferior = true; }
             });

@@ -264,7 +264,7 @@ function fameMateriaisOrcamento($pdo, $id_orcamento, $alfabetica = true, $so_mat
     if (!$id_orcamento) return $materiais;
     $st = $pdo->prepare("SELECT * FROM orcamento_itens WHERE orcamento_id = ? ORDER BY id ASC");
     $st->execute([$id_orcamento]);
-    $todas = $st->fetchAll(PDO::FETCH_ASSOC);
+    $todas = array_values(array_filter($st->fetchAll(PDO::FETCH_ASSOC), fn($l) => empty($l['excluida'])));   // linhas excluídas do orçamento não entram na FAME
     $tem_interno = false;
     foreach ($todas as $it) {
         if (($it['tipo_linha'] ?? 'Interno') !== 'Comercial' && (float)($it['quantidade'] ?? 0) > 0) { $tem_interno = true; break; }

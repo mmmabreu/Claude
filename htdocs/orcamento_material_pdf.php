@@ -47,7 +47,7 @@ try {
 
     $stmt_itens = $pdo->prepare("SELECT * FROM orcamento_itens WHERE orcamento_id = ? ORDER BY id ASC");
     $stmt_itens->execute([$id]);
-    $itens_raw = $stmt_itens->fetchAll(PDO::FETCH_ASSOC);
+    $itens_raw = array_values(array_filter($stmt_itens->fetchAll(PDO::FETCH_ASSOC), fn($l) => empty($l['excluida'])));   // linhas excluídas não entram no material
 } catch (Exception $e) {
     ob_end_clean();
     die("Erro na BD: " . htmlspecialchars($e->getMessage()));

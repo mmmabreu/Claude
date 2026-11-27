@@ -73,6 +73,7 @@ try {
         foreach ($lin_prev as $n => $lp) {
             $desig_p = (string)($lp['designacao'] ?? ''); $art_p = (string)($lp['artigo'] ?? ''); $q_str_p = (string)($lp['quantidade'] ?? '');
             if (trim($desig_p) === '' && trim($art_p) === '' && trim($q_str_p) === '') continue;
+            if (!empty($lp['excluida'])) continue;   // linha excluída: só aparece em «Não inclui»
             $q_p = limparNumero($q_str_p); $pc_p = limparNumero($lp['preco_unitario_custo'] ?? '0');
             $pv_p = limparNumero($lp['preco_unitario_venda'] ?? '0'); $tmo_p = limparNumero($lp['tempo_mao_obra'] ?? '0');
             $itens_raw[] = [
@@ -86,7 +87,7 @@ try {
     } else {
         $stmt_itens = $pdo->prepare("SELECT * FROM orcamento_itens WHERE orcamento_id = ? ORDER BY id ASC");
         $stmt_itens->execute([$id]);
-        $itens_raw = $stmt_itens->fetchAll(PDO::FETCH_ASSOC);
+        $itens_raw = array_values(array_filter($stmt_itens->fetchAll(PDO::FETCH_ASSOC), fn($l) => empty($l['excluida'])));   // excluídas: só aparecem em «Não inclui»
     }
 
     // Separar por canais Interno vs Comercial

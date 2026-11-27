@@ -140,7 +140,7 @@ try {
             if (!$orc) return null;
             $st = $pdo->prepare("SELECT * FROM orcamento_itens WHERE orcamento_id = ? ORDER BY id ASC");
             $st->execute([$orc['id']]);
-            $todas = $st->fetchAll(PDO::FETCH_ASSOC);
+            $todas = array_values(array_filter($st->fetchAll(PDO::FETCH_ASSOC), fn($l) => empty($l['excluida'])));   // linhas excluídas não entram no auto
         } catch (Exception $e) { return null; }
 
         $tem_comercial = false;
@@ -192,7 +192,7 @@ try {
             if (in_array((int)$c['id'], $ja, true)) continue;
             $st = $pdo->prepare("SELECT * FROM orcamento_itens WHERE orcamento_id = ? ORDER BY id ASC");
             $st->execute([$c['id']]);
-            $todas = $st->fetchAll(PDO::FETCH_ASSOC);
+            $todas = array_values(array_filter($st->fetchAll(PDO::FETCH_ASSOC), fn($l) => empty($l['excluida'])));   // linhas excluídas não entram no auto
             $tem_com = false;
             foreach ($todas as $l) if (($l['tipo_linha'] ?? 'Interno') === 'Comercial' && trim((string)$l['designacao']) !== '') { $tem_com = true; break; }
             $tipo = $tem_com ? 'Comercial' : 'Interno';
