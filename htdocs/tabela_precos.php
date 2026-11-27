@@ -14,6 +14,33 @@ if (file_exists('functions.php')) {
     function registrarLog($pdo, $acao, $modulo) { return true; } 
 }
 
+if (!function_exists('gerar_csrf_token')) {
+    function gerar_csrf_token() { if (empty($_SESSION['csrf_token'])) $_SESSION['csrf_token'] = bin2hex(random_bytes(32)); return $_SESSION['csrf_token']; }
+    function validar_csrf_token($t) { return !empty($_SESSION['csrf_token']) && !empty($t) && hash_equals($_SESSION['csrf_token'], (string)$t); }
+}
+// REGRA DE OURO 7: todos os pedidos POST (formulários e AJAX) trazem o csrf_token
+$csrf_ok = ($_SERVER['REQUEST_METHOD'] !== 'POST') || validar_csrf_token($_POST['csrf_token'] ?? '');
+$csrf_msg = 'A sessão expirou ou o pedido não é válido. Atualize a página (F5) e tente de novo.';
+
+// Nunca perder dados: cópia do artigo antes de o alterar, apagar ou de aplicar a margem global.
+// (CREATE TABLE fora de transações: no MySQL faz commit implícito.)
+function tpCriarArquivo($pdo) {
+    $pdo->exec("CREATE TABLE IF NOT EXISTS tabela_precos_arquivo (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        id_artigo INT NOT NULL,
+        acao VARCHAR(20) NOT NULL,
+        dados_json LONGTEXT NOT NULL,
+        arquivado_por INT NULL,
+        arquivado_em DATETIME NOT NULL,
+        INDEX (id_artigo)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+}
+function tpArquivar($pdo, array $linhas, $acao) {
+    if (!$linhas) return;
+    $st = $pdo->prepare("INSERT INTO tabela_precos_arquivo (id_artigo, acao, dados_json, arquivado_por, arquivado_em) VALUES (?, ?, ?, ?, NOW())");
+    foreach ($linhas as $l) $st->execute([(int)$l['id'], $acao, json_encode($l, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE), (int)($_SESSION['user_id'] ?? 0)]);
+}
+
 // Biblioteca de fichas técnicas (fichas_tecnicas.php): marca e ficha técnica de cada artigo
 $tem_fichas = file_exists('fichas_tecnicas_lib.php');
 if ($tem_fichas) { require_once 'fichas_tecnicas_lib.php'; ft_migrar($pdo); }
@@ -57,6 +84,7 @@ if (isset($_GET['ajax_save_artigo'])) {
     ob_start();   // avisos do PHP não podem estragar a resposta JSON
     header('Content-Type: application/json');
     try {
+        if (!$csrf_ok) throw new Exception($csrf_msg);
         $id_artigo = filter_input(INPUT_POST, 'id_artigo', FILTER_VALIDATE_INT);
         $referencia = trim($_POST['referencia'] ?? '');
         $descricao = trim($_POST['descricao'] ?? '');
@@ -102,6 +130,10 @@ if (isset($_GET['ajax_save_artigo'])) {
                 }
             }
 
+            tpCriarArquivo($pdo);
+            $st_arq = $pdo->prepare("SELECT * FROM tabela_precos WHERE id = ?"); $st_arq->execute([$id_artigo]);
+            tpArquivar($pdo, $st_arq->fetchAll(PDO::FETCH_ASSOC), 'alterado');
+
             $sql = "UPDATE tabela_precos SET referencia = ?, descricao = ?, unidade = ?, preco_custo = ?, percentagem_lucro = ?, margem_bloqueada = ?, preco_material = ?, valor_mo = ?, preco_com_mo = ?, tempo_mao_obra = ?, n_colaboradores = ?, data_alteracao = ? WHERE id = ?";
             $stmt = $pdo->prepare($sql);
             $stmt->execute([$referencia, $descricao, $unidade, $preco_custo, $percentagem_lucro, $margem_bloqueada, $preco_material, $valor_mo, $preco_com_mo, $tempo_mao_obra, $n_colaboradores, $data_alteracao, $id_artigo]);
@@ -137,6 +169,7 @@ if (isset($_GET['ajax_nova_ficha'])) {
     ob_start();   // avisos do PHP não podem estragar a resposta JSON
     header('Content-Type: application/json');
     try {
+        if (!$csrf_ok) throw new Exception($csrf_msg);
         if (!$tem_fichas) throw new Exception('Falta o ficheiro fichas_tecnicas_lib.php no servidor.');
         $marca  = mb_substr(trim((string)($_POST['marca'] ?? '')), 0, 100);
         $modelo = mb_substr(trim((string)($_POST['modelo'] ?? '')), 0, 150);
@@ -167,6 +200,7 @@ if (isset($_GET['ajax_certificado'])) {
     ob_start();
     header('Content-Type: application/json');
     try {
+        if (!$csrf_ok) throw new Exception($csrf_msg);
         if (!$tem_fichas) throw new Exception('Falta o ficheiro fichas_tecnicas_lib.php no servidor.');
         $id_f = filter_input(INPUT_POST, 'id_ficha', FILTER_VALIDATE_INT);
         $st = $pdo->prepare("SELECT * FROM fichas_tecnicas WHERE id = ?"); $st->execute([$id_f ?: 0]);
@@ -194,8 +228,13 @@ if (isset($_GET['ajax_certificado'])) {
 $mensagem = ''; 
 $tipo_mensagem = '';
 $termo_filtro = $_POST['termo_filtro'] ?? '';
+$marca_filtro = $_POST['marca_filtro'] ?? '';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+$tem_acao = isset($_POST['importar_csv_json']) || isset($_POST['btn_confirmar_apagar']) || isset($_POST['btn_aplicar_margem_global']);
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $tem_acao && !$csrf_ok) {
+    $mensagem = $csrf_msg;
+    $tipo_mensagem = "erro";
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
     
     // 1. IMPORTAR CSV
     if (isset($_POST['importar_csv_json'])) {
@@ -260,18 +299,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt_pass->execute(); 
             $pass_config = $stmt_pass->fetchColumn();
 
-            if ($pass_introduzida !== $pass_config || empty($pass_introduzida)) { 
+            if ($pass_introduzida === '' || (string)$pass_config === '' || !hash_equals((string)$pass_config, (string)$pass_introduzida)) { 
                 $mensagem = "Password de segurança incorreta.";  
                 $tipo_mensagem = "erro"; 
             } else {
                 try {
+                    tpCriarArquivo($pdo);
+                    $st_arq = $pdo->prepare("SELECT * FROM tabela_precos WHERE id = ?"); $st_arq->execute([$id_apagar ?: 0]);
+                    $pdo->beginTransaction();
+                    tpArquivar($pdo, $st_arq->fetchAll(PDO::FETCH_ASSOC), 'apagado');
                     $stmt_del = $pdo->prepare("DELETE FROM tabela_precos WHERE id = ?");
                     $stmt_del->execute([$id_apagar]);
+                    $pdo->commit();
                     registrarLog($pdo, "Apagou artigo da Tabela de Preços (ID: $id_apagar)", "Tabela de Preços");
                     
-                    $mensagem = "Artigo removido com sucesso.";  
+                    $mensagem = "Artigo removido. Fica guardada uma cópia no arquivo.";  
                     $tipo_mensagem = "sucesso"; 
                 } catch (Exception $e) {
+                    if ($pdo->inTransaction()) $pdo->rollBack();
                     $mensagem = "Erro ao apagar artigo: " . htmlspecialchars($e->getMessage());  
                     $tipo_mensagem = "erro"; 
                 }
@@ -289,6 +334,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $data_alteracao = date('Y-m-d H:i:s');
             
             try {
+                tpCriarArquivo($pdo);
+                $pdo->beginTransaction();
+                tpArquivar($pdo, $pdo->query("SELECT * FROM tabela_precos WHERE margem_bloqueada = 0")->fetchAll(PDO::FETCH_ASSOC), 'margem_global');
                 // IGNORA OS ARTIGOS ONDE margem_bloqueada = 1
                 $sql = "UPDATE tabela_precos SET 
                         percentagem_lucro = :m1,
@@ -308,10 +356,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'dt' => $data_alteracao
                 ]);
                 
+                $pdo->commit();
                 registrarLog($pdo, "Aplicou Margem Global de $margem_global% na Tabela de Preços", "Tabela de Preços");
                 $mensagem = "Margem aplicada com sucesso aos artigos não bloqueados!";
                 $tipo_mensagem = "sucesso";
             } catch (Exception $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
                 $mensagem = "Erro ao aplicar margem global: " . htmlspecialchars($e->getMessage());
                 $tipo_mensagem = "erro";
             }
@@ -326,6 +376,15 @@ try {
 } catch (Exception $e) {
     die("Erro ao carregar a Tabela de Preços: " . htmlspecialchars($e->getMessage()));
 }
+
+// Filtro de marca: marcas dos artigos da tabela, com o número de artigos de cada uma
+$marcas_filtro = []; $n_sem_marca = 0;
+foreach ($artigos as $a) {
+    $m = trim((string)($a['marca'] ?? ''));
+    if ($m === '') { $n_sem_marca++; continue; }
+    $marcas_filtro[$m] = ($marcas_filtro[$m] ?? 0) + 1;
+}
+uksort($marcas_filtro, 'strnatcasecmp');
 
 // Referências que já estão repetidas na tabela (de antes desta regra)
 $refs_contagem = [];
@@ -355,7 +414,9 @@ natcasesort($marcas_lista);
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Tabela de Preços - Gestão MAB</title>
-    <link rel="icon" type="image/png" href="mab.png">
+    <!-- REGRA DE OURO 8: ícone MAB no separador -->
+    <link rel="icon" type="image/png" href="/mab.png">
+    <link rel="apple-touch-icon" href="/mab.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; background-color: #f7f9fc; margin: 0; color: #333; padding-bottom: 50px; }
@@ -395,6 +456,12 @@ natcasesort($marcas_lista);
         .search-input { width: 100%; padding: 10px 15px 10px 40px; border: 1px solid #dcdde1; border-radius: 30px; font-size: 14px; outline: none; transition: 0.2s; font-family: inherit; }
         .search-input:focus { border-color: #3498db; box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1); }
         
+        .header-acoes { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .marca-container { position: relative; width: 240px; max-width: 100%; }
+        .marca-container i { position: absolute; left: 15px; top: 50%; transform: translateY(-50%); color: #95a5a6; pointer-events: none; }
+        .marca-container select { appearance: none; -webkit-appearance: none; background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2395a5a6'/%3E%3C/svg%3E") no-repeat right 15px center; padding-right: 32px; cursor: pointer; }
+        .marca-container select.ativo { border-color: #16a085; color: #117864; font-weight: 700; }
+        .contagem-filtro { font-size: 13px; color: #7f8c8d; font-weight: 600; margin-right: auto; }
         .margem-global-form { display: flex; align-items: center; gap: 10px; background: #fff; padding: 6px 15px; border-radius: 30px; border: 1px solid #e1e5ea; }
         .margem-global-form label { margin: 0; font-size: 11px; font-weight: 700; color: #576574; text-transform: uppercase; }
         .margem-global-form input { width: 70px; padding: 6px; border: 1px solid #dcdde1; border-radius: 6px; text-align: center; font-size: 14px; outline: none; }
@@ -487,6 +554,35 @@ natcasesort($marcas_lista);
             .form-grid { grid-template-columns: 1fr; }
             .form-group.full { grid-column: span 1; }
             .tools-bar { flex-direction: column; align-items: stretch; }
+            .search-container, .marca-container { max-width: none; width: 100%; }
+            /* Telemóvel: botões do topo em grelha e cada artigo passa a cartão */
+            .header-acoes { display: grid !important; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+            .header-acoes > a, .header-acoes > button { justify-content: center; text-align: center; width: 100%; }
+            .table-container { background: transparent; border: none; box-shadow: none; overflow: visible; }
+            .table-responsive { height: auto; overflow: visible; }
+            #tabelaPrecos { min-width: 0; }
+            #tabelaPrecos thead { display: none; }
+            #tabelaPrecos, #tabelaPrecos tbody { display: block; width: 100%; }
+            #tabelaPrecos tr.linha-artigo { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px 10px; background: #fff; border: 1px solid #e1e5ea; border-radius: 12px; padding: 12px; margin-bottom: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
+            #tabelaPrecos tr.linha-artigo > td { display: block; padding: 0; border: none; text-align: left !important; font-size: 13px; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(1) { grid-column: 1 / 3; grid-row: 1; font-size: 14px; align-self: center; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(13) { grid-column: 3; grid-row: 1; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(13) .acoes { justify-content: flex-end; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(2) { grid-column: 1 / -1; font-size: 14px; color: #2c3e50; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(3) { grid-column: 1 / -1; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(n+4):nth-child(-n+12) { border-top: 1px solid #f1f2f6; padding-top: 6px; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(n+4):nth-child(-n+12)::before { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; color: #95a5a6; margin-bottom: 2px; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(4)::before { content: "Unid."; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(5)::before { content: "Custo base"; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(6)::before { content: "Margem"; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(7)::before { content: "Preço mat."; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(8)::before { content: "Tempo (min)"; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(9)::before { content: "Nº colab."; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(10)::before { content: "Valor M.O."; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(11)::before { content: "Preço c/ M.O."; color: #f39c12; }
+            #tabelaPrecos tr.linha-artigo > td:nth-child(12)::before { content: "Última alt."; }
+            #tabelaPrecos tr:not(.linha-artigo) { display: block; }
+            #tabelaPrecos tr:not(.linha-artigo) > td { display: block; background: #fff; border-radius: 12px; }
             .margem-global-form { justify-content: space-between; }
         }
     </style>
@@ -531,7 +627,7 @@ natcasesort($marcas_lista);
         <div class="page-header">
             <h1 class="page-title"><i class="fa-solid fa-list-ol"></i> Tabela de Preços</h1>
             
-            <div style="display:flex; gap:10px; align-items:center;">
+            <div class="header-acoes">
                 <?php if ($tem_fichas): ?>
                 <a href="fichas_tecnicas.php" class="btn-novo" style="color: #117864; border-color: #a3e4d7; background: #f6fcfa;">
                     <i class="fa-solid fa-book-open"></i> Fichas Técnicas
@@ -552,6 +648,7 @@ natcasesort($marcas_lista);
         
         <form id="csvForm" method="POST" style="display:none;">
             <input type="hidden" name="importar_csv_json" id="csv_data_input">
+            <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
         </form>
 
         <div class="tools-bar">
@@ -560,9 +657,25 @@ natcasesort($marcas_lista);
                 <input type="text" id="filtroReferencia" class="search-input" onkeyup="filtrarTabela()" placeholder="Pesquisar por Referência, Descrição ou Marca..." value="<?= htmlspecialchars($termo_filtro, ENT_QUOTES, 'UTF-8') ?>">
             </div>
 
+            <div class="marca-container">
+                <i class="fa-solid fa-tag"></i>
+                <select id="filtroMarca" class="search-input" onchange="filtrarTabela()" aria-label="Filtrar por marca">
+                    <option value="">Todas as marcas</option>
+                    <?php foreach ($marcas_filtro as $m => $n): ?>
+                        <option value="<?= htmlspecialchars($m, ENT_QUOTES, 'UTF-8') ?>"<?= $marca_filtro === $m ? ' selected' : '' ?>><?= htmlspecialchars($m, ENT_QUOTES, 'UTF-8') ?> (<?= (int)$n ?>)</option>
+                    <?php endforeach; ?>
+                    <?php if ($n_sem_marca > 0): ?>
+                        <option value="__sem__"<?= $marca_filtro === '__sem__' ? ' selected' : '' ?>>Sem marca (<?= (int)$n_sem_marca ?>)</option>
+                    <?php endif; ?>
+                </select>
+            </div>
+            <span id="contagemFiltro" class="contagem-filtro"></span>
+
             <?php if ($is_admin): ?>
             <form method="POST" class="margem-global-form" onsubmit="return confirm('Tem a certeza que deseja aplicar esta margem a TODOS os artigos (exceto os bloqueados)? Esta ação vai recalcular todos os preços.')">
                 <input type="hidden" name="termo_filtro" class="termo_filtro_hidden" value="<?= htmlspecialchars($termo_filtro, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="marca_filtro" class="marca_filtro_hidden" value="<?= htmlspecialchars($marca_filtro, ENT_QUOTES, 'UTF-8') ?>">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
                 <label><i class="fa-solid fa-bolt" style="color:#f39c12; margin-right:4px;"></i> Margem Global:</label>
                 <input type="number" name="margem_global_val" min="0" max="1000" placeholder="Ex: 20" required>
                 <span style="font-weight:bold; color:#576574;">%</span>
@@ -611,7 +724,7 @@ natcasesort($marcas_lista);
                                 $is_locked = ($art['margem_bloqueada'] ?? 0) == 1;
                                 $lock_icon = $is_locked ? ' <i class="fa-solid fa-lock" style="color:#e74c3c; font-size:10px; margin-left:3px;" title="Margem Bloqueada"></i>' : '';
                             ?>
-                                <tr class="linha-artigo">
+                                <tr class="linha-artigo" data-marca="<?= htmlspecialchars(trim((string)($art['marca'] ?? '')), ENT_QUOTES, 'UTF-8') ?>">
                                     <td class="ref-bold"><?= htmlspecialchars($art['referencia'], ENT_QUOTES, 'UTF-8') ?></td>
                                     <td><?= nl2br(htmlspecialchars($art['descricao'], ENT_QUOTES, 'UTF-8')) ?></td>
                                     <td class="td-marca"><?php
@@ -673,6 +786,8 @@ natcasesort($marcas_lista);
             
             <form id="formArtigo" onsubmit="event.preventDefault(); salvarArtigoAjax();">
                 <input type="hidden" name="termo_filtro" class="termo_filtro_hidden" value="<?= htmlspecialchars($termo_filtro, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="marca_filtro" class="marca_filtro_hidden" value="<?= htmlspecialchars($marca_filtro, ENT_QUOTES, 'UTF-8') ?>">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
                 <input type="hidden" name="id_artigo" id="form_id_artigo" value="">
                 <input type="hidden" name="margem_bloqueada" id="form_margem_bloqueada" value="0">
                 
@@ -818,9 +933,11 @@ natcasesort($marcas_lista);
             <div class="modal-header" style="border-bottom:none; margin-bottom:0; justify-content:center;">
                 <h3 style="color:#e74c3c;"><i class="fa-solid fa-triangle-exclamation"></i> Confirmar Eliminação</h3>
             </div>
-            <p>Deseja apagar o artigo <strong id="txt_modal_apagar"></strong> da tabela de preços?<br><span style="font-size:12px; color:#7f8c8d;">Esta ação é irreversível.</span></p>
+            <p>Deseja apagar o artigo <strong id="txt_modal_apagar"></strong> da tabela de preços?<br><span style="font-size:12px; color:#7f8c8d;">Fica guardada uma cópia no arquivo.</span></p>
             <form method="POST">
                 <input type="hidden" name="termo_filtro" class="termo_filtro_hidden" value="<?= htmlspecialchars($termo_filtro, ENT_QUOTES, 'UTF-8') ?>">
+                <input type="hidden" name="marca_filtro" class="marca_filtro_hidden" value="<?= htmlspecialchars($marca_filtro, ENT_QUOTES, 'UTF-8') ?>">
+                <?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token(), ENT_QUOTES, 'UTF-8') ?>">
                 <input type="hidden" name="id_artigo_apagar" id="id_artigo_apagar_input">
                 <input type="password" name="pass_seguranca" required placeholder="Password de Segurança" style="width:100%; padding:12px; border:1px solid #ddd; border-radius:8px; margin: 15px 0;">
                 <div style="display:flex; gap:10px; margin-top:15px;">
@@ -854,7 +971,9 @@ natcasesort($marcas_lista);
                 document.body.appendChild(fr);
             });
         }
+        const CSRF_TOKEN = <?= json_encode(gerar_csrf_token()) ?>;
         async function pedirJSON(url, fd, repetir = true) {
+            if (fd && !fd.has('csrf_token')) fd.append('csrf_token', CSRF_TOKEN);   // REGRA DE OURO 7
             const res = await fetch(url, { method: 'POST', body: fd, credentials: 'same-origin' });
             const txt = await res.text();
             try { return JSON.parse(txt); }
@@ -1086,6 +1205,13 @@ natcasesort($marcas_lista);
                 input.value = document.getElementById("filtroReferencia").value;
 
                 form.appendChild(input);
+                const inMarca = document.createElement('input');
+                inMarca.type = 'hidden'; inMarca.name = 'marca_filtro';
+                inMarca.value = document.getElementById('filtroMarca').value;
+                form.appendChild(inMarca);
+                const inCsrf = document.createElement('input');
+                inCsrf.type = 'hidden'; inCsrf.name = 'csrf_token'; inCsrf.value = CSRF_TOKEN;
+                form.appendChild(inCsrf);
                 document.body.appendChild(form);
                 form.submit();
             }
@@ -1193,41 +1319,43 @@ natcasesort($marcas_lista);
             mostrarToast("Modo Duplicação ativado. Faça as alterações e clique em Gravar.");
         }
 
-        // --- FILTRO INTELIGENTE OTIMIZADO ---
+        // --- FILTRO: pesquisa (referência, descrição, marca) + marca ---
         function filtrarTabela() {
-            let input = document.getElementById("filtroReferencia");
-            let filter = input.value.toUpperCase();
-            
+            const input = document.getElementById("filtroReferencia");
+            const selMarca = document.getElementById("filtroMarca");
+            const filter = input.value.toUpperCase();
+            const marca = selMarca.value;
+            selMarca.classList.toggle('ativo', marca !== '');
+
             document.querySelectorAll('.termo_filtro_hidden').forEach(el => el.value = input.value);
-            
-            let table = document.getElementById("tabelaPrecos");
-            let tr = table.getElementsByClassName("linha-artigo");
+            document.querySelectorAll('.marca_filtro_hidden').forEach(el => el.value = marca);
+
+            const table = document.getElementById("tabelaPrecos");
+            const tr = table.getElementsByClassName("linha-artigo");
             let countVisible = 0;
 
             for (let i = 0; i < tr.length; i++) {
-                let tdRef = tr[i].getElementsByTagName("td")[0]; 
-                let tdDesc = tr[i].getElementsByTagName("td")[1]; 
-                let tdMarca = tr[i].querySelector('.td-marca');
-                
-                if (tdRef && tdDesc) {
-                    let txtRefVal = tdRef.textContent || tdRef.innerText;
-                    let txtDescVal = tdDesc.textContent || tdDesc.innerText;
-                    let txtMarca = tdMarca ? (tdMarca.textContent || '') : '';
-                    
-                    if (txtRefVal.toUpperCase().indexOf(filter) > -1 || txtDescVal.toUpperCase().indexOf(filter) > -1 || txtMarca.toUpperCase().indexOf(filter) > -1) {
-                        tr[i].style.display = ""; 
-                        countVisible++;
-                    } else {
-                        tr[i].style.display = "none";
-                    }
-                }
+                const tdRef = tr[i].getElementsByTagName("td")[0];
+                const tdDesc = tr[i].getElementsByTagName("td")[1];
+                const tdMarca = tr[i].querySelector('.td-marca');
+                if (!tdRef || !tdDesc) continue;
+
+                const mLinha = tr[i].dataset.marca || '';
+                const marcaOk = marca === '' || (marca === '__sem__' ? mLinha === '' : mLinha === marca);
+                const txt = ((tdRef.textContent || '') + ' ' + (tdDesc.textContent || '') + ' ' + (tdMarca ? tdMarca.textContent : '')).toUpperCase();
+                const mostra = marcaOk && (filter === '' || txt.indexOf(filter) > -1);
+                tr[i].style.display = mostra ? '' : 'none';
+                if (mostra) countVisible++;
             }
+
+            const filtrado = filter.trim() !== '' || marca !== '';
+            document.getElementById('contagemFiltro').textContent = filtrado ? countVisible + ' de ' + tr.length + ' artigo(s)' : '';
 
             let msgVazia = document.getElementById('msgVaziaFiltro');
             if (countVisible === 0 && tr.length > 0) {
                 if (!msgVazia) {
-                    let tbody = table.querySelector('tbody');
-                    tbody.insertAdjacentHTML('beforeend',  '<tr id="msgVaziaFiltro"><td colspan="13" class="text-center" style="padding:40px; color:#7f8c8d;">Nenhum artigo encontrado para esta pesquisa.</td></tr>');
+                    const tbody = table.querySelector('tbody');
+                    tbody.insertAdjacentHTML('beforeend', '<tr id="msgVaziaFiltro"><td colspan="13" class="text-center" style="padding:40px; color:#7f8c8d;">Nenhum artigo encontrado para esta pesquisa.</td></tr>');
                 } else {
                     msgVazia.style.display = '';
                 }
@@ -1237,7 +1365,7 @@ natcasesort($marcas_lista);
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            if (document.getElementById('filtroReferencia').value.trim() !== '') {
+            if (document.getElementById('filtroReferencia').value.trim() !== '' || document.getElementById('filtroMarca').value !== '') {
                 filtrarTabela();
             }
         });
