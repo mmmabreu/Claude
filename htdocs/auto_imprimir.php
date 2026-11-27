@@ -324,6 +324,9 @@ function linhasAuto($lista, $suplementar, $fmt) {
             .no-print { display: none !important; }
             .info-grid { border: none; padding: 0; background: none !important; }
             
+            /* Logótipo, cliente, obra e detalhes só na 1.ª folha. Nas seguintes ficam só os artigos
+               (com os títulos das colunas), a começar 1 cm abaixo do topo (margem da folha). */
+            table.wrapper-table > thead { display: table-row-group; }
             table.wrapper-table > thead > tr > td { padding-top: 0 !important; }
             table.wrapper-table > tfoot > tr > td { padding-bottom: 0 !important; }
             
