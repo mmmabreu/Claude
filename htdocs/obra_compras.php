@@ -6,6 +6,8 @@
 // - Cada linha é associada a um artigo do ORÇAMENTO ADJUDICADO da obra e/ou da TABELA DE PREÇOS:
 //   o sistema sugere (memória → referência → descrição parecida); se não houver sugestão, procura-se à mão.
 //   A escolha fica memorizada (compras_memoria) para as compras seguintes.
+// - CONSUMÍVEIS (parafusos, fita isoladora, buchas...): marcam-se numa caixa; não precisam de artigo, não contam
+//   horas de montagem nem entram na comparação com o orçamento, e têm um somatório próprio. Também ficam memorizados.
 // - A compra entra no Resultado da Obra (gestao.php) como despesa de Material (origem 'Compra', valor sem IVA).
 // - Análise: comprado vs orçamentado por artigo, desvio de preço de custo, horas previstas do material comprado
 //   (quantidade × tempo de M.O. do artigo) comparadas com as horas orçamentadas e as horas normais registadas.
@@ -88,6 +90,8 @@ try {
         atualizado_por INT NULL, atualizado_em DATETIME NULL
     ) DEFAULT CHARSET=utf8mb4");
     if (!fameColunaExiste($pdo, 'obra_despesas', 'id_compra')) $pdo->exec("ALTER TABLE obra_despesas ADD COLUMN id_compra INT NULL");
+    if (!fameColunaExiste($pdo, 'compras_linhas', 'consumivel')) $pdo->exec("ALTER TABLE compras_linhas ADD COLUMN consumivel TINYINT(1) NOT NULL DEFAULT 0");
+    if (!fameColunaExiste($pdo, 'compras_memoria', 'consumivel')) $pdo->exec("ALTER TABLE compras_memoria ADD COLUMN consumivel TINYINT(1) NOT NULL DEFAULT 0");
 } catch (Exception $ex) {
     error_log('obra_compras.php (tabelas): ' . $ex->getMessage());
     $erro_tabelas = 'Não foi possível preparar as tabelas das compras. Avise o administrador.';
@@ -148,11 +152,16 @@ function valoresArtigo($orc_chave, $id_tab, $art_orc, $art_tab) {
     if ($id_tab && isset($art_tab[$id_tab])) { $a = $art_tab[$id_tab]; return [null, $a['un'], $id_tab, $a['t'], $a['pc']]; }
     return [null, null, null, null, null];
 }
-function guardarMemoria($pdo, $designacao, $orc_desig, $orc_un, $id_tab, $fator) {
-    $pdo->prepare("INSERT INTO compras_memoria (chave, id_artigo_tabela, orc_designacao, orc_unidade, fator, atualizado_por, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, NOW())
+// Memória: a mesma descrição (de qualquer fornecedor) volta a ter a mesma associação / marca de consumível
+function guardarMemoria($pdo, $designacao, $orc_desig, $orc_un, $id_tab, $fator, $consumivel = 0) {
+    $pdo->prepare("INSERT INTO compras_memoria (chave, id_artigo_tabela, orc_designacao, orc_unidade, fator, consumivel, atualizado_por, atualizado_em) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
                    ON DUPLICATE KEY UPDATE id_artigo_tabela = VALUES(id_artigo_tabela), orc_designacao = VALUES(orc_designacao), orc_unidade = VALUES(orc_unidade),
-                   fator = VALUES(fator), atualizado_por = VALUES(atualizado_por), atualizado_em = NOW()")
-        ->execute([mb_substr(normTxt($designacao), 0, 191), $id_tab ?: null, $orc_desig, $orc_un, $fator, $_SESSION['user_id']]);
+                   fator = VALUES(fator), consumivel = VALUES(consumivel), atualizado_por = VALUES(atualizado_por), atualizado_em = NOW()")
+        ->execute([mb_substr(normTxt($designacao), 0, 191), $id_tab ?: null, $orc_desig, $orc_un, $fator, $consumivel ? 1 : 0, $_SESSION['user_id']]);
+}
+// Apaga da memória a escolha de uma descrição (quando a linha volta a ficar sem artigo e sem ser consumível)
+function esquecerMemoria($pdo, $designacao) {
+    $pdo->prepare("DELETE FROM compras_memoria WHERE chave = ?")->execute([mb_substr(normTxt($designacao), 0, 191)]);
 }
 // Alvo escolhido no browser: "o:<chave do orçamento>" ou "t:<id da tabela>" (ou vazio = sem associação)
 function lerAlvo($alvo, $art_orc, $art_tab) {
@@ -203,11 +212,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$erro_tabelas) {
                 $desc_pct = max(0, min(100, numLimpo($l['desconto'] ?? 0)));
                 $liq = isset($l['valor']) && $l['valor'] !== '' ? round(numLimpo($l['valor']), 2) : round($q * $p * (1 - $desc_pct / 100), 2);
                 $taxa = ($l['taxa'] ?? '') !== '' ? numLimpo($l['taxa']) : null;
-                [$orc_k, $id_tab_sel] = lerAlvo($l['alvo'] ?? '', $art_orc, $art_tab);
+                $cons = !empty($l['consumivel']) ? 1 : 0;
+                [$orc_k, $id_tab_sel] = $cons ? ['', 0] : lerAlvo($l['alvo'] ?? '', $art_orc, $art_tab);   // consumível: sem artigo
                 [$orc_desig, $orc_un, $id_tab, $t_un, $pc_ref] = valoresArtigo($orc_k, $id_tab_sel, $art_orc, $art_tab);
-                $fator = numLimpo($l['fator'] ?? 1); if ($fator <= 0) $fator = 1;
+                $fator = numLimpo($l['fator'] ?? 1); if ($fator <= 0 || $cons) $fator = 1;
                 $assoc = ($orc_desig !== null || $id_tab) ? (in_array($l['origem'] ?? '', ['memoria', 'referencia', 'semelhante', 'manual'], true) ? $l['origem'] : 'manual') : null;
-                $limpas[] = [$i + 1, $desig, mb_substr(trim((string)($l['un'] ?? '')), 0, 15), $q, $p, $desc_pct, $liq, $taxa, $assoc, $id_tab ?: null, $orc_desig, $orc_un, $fator, $t_un, $pc_ref];
+                $limpas[] = [$i + 1, $desig, mb_substr(trim((string)($l['un'] ?? '')), 0, 15), $q, $p, $desc_pct, $liq, $taxa, $assoc, $id_tab ?: null, $orc_desig, $orc_un, $fator, $t_un, $pc_ref, $cons];
                 $tot_merc += $liq;
                 if ($taxa !== null) $tot_iva += $liq * $taxa / 100;
             }
@@ -225,11 +235,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$erro_tabelas) {
                 ->execute([$id_obra, $tipo_doc, $num_doc, $data_doc, $fornecedor, $nif ?: null, $tot_merc, $tot_iva, round($tot_merc + $tot_iva, 2),
                            mb_substr(basename((string)($cab['ficheiro'] ?? '')), 0, 255), $_SESSION['user_id']]);
             $id_compra = (int)$pdo->lastInsertId();
-            $ins = $pdo->prepare("INSERT INTO compras_linhas (id_compra, ordem, designacao, unidade, quantidade, preco_unit, desconto, valor_liquido, taxa_iva, assoc_tipo, id_artigo_tabela, orc_designacao, orc_unidade, fator, tempo_un, preco_ref)
-                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $ins = $pdo->prepare("INSERT INTO compras_linhas (id_compra, ordem, designacao, unidade, quantidade, preco_unit, desconto, valor_liquido, taxa_iva, assoc_tipo, id_artigo_tabela, orc_designacao, orc_unidade, fator, tempo_un, preco_ref, consumivel)
+                                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             foreach ($limpas as $r) {
                 $ins->execute(array_merge([$id_compra], $r));
-                if ($r[8]) guardarMemoria($pdo, $r[1], $r[10], $r[11], $r[9], $r[12]);   // memoriza a associação
+                if ($r[8] || $r[15]) guardarMemoria($pdo, $r[1], $r[10], $r[11], $r[9], $r[12], $r[15]);   // memoriza a associação / o consumível
             }
             // Despesa de Material no Resultado da Obra (valor sem IVA)
             $desc_desp = trim(($fornecedor !== '' ? $fornecedor . ' · ' : '') . ($num_doc !== '' ? $num_doc : 'Compra importada'));
@@ -255,13 +265,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$erro_tabelas) {
             $st->execute([$id_l, $id_obra]);
             $lin = $st->fetch(PDO::FETCH_ASSOC);
             if (!$lin) throw new Exception('Linha não encontrada.');
-            [$orc_k, $id_tab_sel] = lerAlvo($_POST['alvo'] ?? '', $art_orc, $art_tab);
+            $cons = !empty($_POST['consumivel']) ? 1 : 0;
+            [$orc_k, $id_tab_sel] = $cons ? ['', 0] : lerAlvo($_POST['alvo'] ?? '', $art_orc, $art_tab);
             [$orc_desig, $orc_un, $id_tab, $t_un, $pc_ref] = valoresArtigo($orc_k, $id_tab_sel, $art_orc, $art_tab);
-            $fator = numLimpo($_POST['fator'] ?? 1); if ($fator <= 0) $fator = 1;
+            $fator = numLimpo($_POST['fator'] ?? 1); if ($fator <= 0 || $cons) $fator = 1;
             $assoc = ($orc_desig !== null || $id_tab) ? 'manual' : null;
-            $pdo->prepare("UPDATE compras_linhas SET assoc_tipo = ?, id_artigo_tabela = ?, orc_designacao = ?, orc_unidade = ?, fator = ?, tempo_un = ?, preco_ref = ? WHERE id = ?")
-                ->execute([$assoc, $id_tab ?: null, $orc_desig, $orc_un, $fator, $t_un, $pc_ref, $id_l]);
-            if ($assoc) guardarMemoria($pdo, $lin['designacao'], $orc_desig, $orc_un, $id_tab, $fator);
+            $pdo->prepare("UPDATE compras_linhas SET assoc_tipo = ?, id_artigo_tabela = ?, orc_designacao = ?, orc_unidade = ?, fator = ?, tempo_un = ?, preco_ref = ?, consumivel = ? WHERE id = ?")
+                ->execute([$assoc, $id_tab ?: null, $orc_desig, $orc_un, $fator, $t_un, $pc_ref, $cons, $id_l]);
+            if ($assoc || $cons) guardarMemoria($pdo, $lin['designacao'], $orc_desig, $orc_un, $id_tab, $fator, $cons);
+            else esquecerMemoria($pdo, $lin['designacao']);
             echo json_encode(['ok' => true]);
         } catch (Exception $ex) {
             error_log('obra_compras.php (associar): ' . $ex->getMessage());
@@ -316,12 +328,22 @@ try {
 
 // Análise (só compras ativas)
 $tot_comprado = 0; $horas_material = 0; $n_linhas = 0; $n_assoc = 0; $sem_assoc = []; $fora_orc = [];
+$tot_consumiveis = 0; $n_consumiveis = 0; $consumiveis_por_desc = [];
 $por_artigo = [];   // chave do orçamento => comprado
 foreach ($compras as $c) {
     if ($c['estado'] !== 'Ativa') continue;
     $tot_comprado += (float)$c['total_mercadoria'];
     foreach ($linhas_por_compra[$c['id']] ?? [] as $l) {
         $n_linhas++;
+        if (!empty($l['consumivel'])) {   // consumíveis: só o valor (sem artigo nem horas)
+            $n_consumiveis++;
+            $tot_consumiveis += (float)$l['valor_liquido'];
+            $kd = normTxt($l['designacao']);
+            if (!isset($consumiveis_por_desc[$kd])) $consumiveis_por_desc[$kd] = ['desc' => $l['designacao'], 'un' => $l['unidade'], 'qtd' => 0, 'valor' => 0];
+            $consumiveis_por_desc[$kd]['qtd'] += (float)$l['quantidade'];
+            $consumiveis_por_desc[$kd]['valor'] += (float)$l['valor_liquido'];
+            continue;
+        }
         $q_conv = (float)$l['quantidade'] * (float)$l['fator'];
         if ($l['tempo_un'] !== null) $horas_material += $q_conv * (float)$l['tempo_un'] / 60;
         if (!$l['assoc_tipo']) { $sem_assoc[] = $l; continue; }
@@ -336,6 +358,9 @@ foreach ($compras as $c) {
         }
     }
 }
+uasort($consumiveis_por_desc, fn($a, $b) => $b['valor'] <=> $a['valor']);
+$tot_material_sem_cons = $tot_comprado - $tot_consumiveis;
+$n_sem_artigo = $n_linhas - $n_assoc - $n_consumiveis;
 $custo_material_orc = 0; $horas_orc = 0;
 foreach ($art_orc as $a) { $custo_material_orc += $a['valor_custo']; $horas_orc += $a['minutos'] / 60; }
 
@@ -362,7 +387,8 @@ try {
             foreach ($art_orc as $k => $a) if ($a['id_tab'] == $m['id_artigo_tabela']) { $alvo = 'o:' . $k; break; }
             if ($alvo === '') $alvo = 't:' . (int)$m['id_artigo_tabela'];
         }
-        if ($alvo !== '') $memoria[$m['chave']] = ['alvo' => $alvo, 'fator' => (float)$m['fator']];
+        if (!empty($m['consumivel'])) $memoria[$m['chave']] = ['alvo' => '', 'fator' => 1, 'consumivel' => true];
+        elseif ($alvo !== '') $memoria[$m['chave']] = ['alvo' => $alvo, 'fator' => (float)$m['fator']];
     }
 } catch (Exception $ex) {}
 $rotulo_alvo = function ($l) use ($art_orc, $art_tab) {
@@ -437,10 +463,14 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
         tr.a-memoria .assoc-input, tr.a-referencia .assoc-input, tr.a-manual .assoc-input { border-color: #27ae60; background: #f0faf4; }
         tr.a-semelhante .assoc-input { border-color: #f0b27a; background: #fef9f3; }
         tr.a-nenhuma .assoc-input { border-color: #f5b7b1; background: #fff; }
+        tr.a-consumivel td { background: #f5f9fd; }
+        tr.a-consumivel .assoc-input { border-color: #d6eaf8; background: #f5f9fd; color: #95a5a6; }
+        .cons-chk { width: 18px; height: 18px; accent-color: #2980b9; cursor: pointer; vertical-align: middle; }
         .tag { font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 10px; text-transform: uppercase; white-space: nowrap; }
         .tag-memoria, .tag-referencia, .tag-manual { background: #e8f5e9; color: #1e8449; }
         .tag-semelhante { background: #fef5e7; color: #d35400; }
         .tag-nenhuma { background: #fdeded; color: #c0392b; }
+        .tag-consumivel { background: #eaf2fb; color: #2980b9; }
         .un-dif { color: #d35400; font-size: 11px; font-weight: 700; display: block; }
         .cab-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
         .cab-grid label { font-size: 11px; font-weight: 700; color: #95a5a6; text-transform: uppercase; display: block; margin-bottom: 4px; }
@@ -503,9 +533,11 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
         ?>
         <div class="kpis">
             <div class="kpi"><div class="t">Material comprado (s/ IVA)</div><div class="v"><?= $fmt($tot_comprado) ?> €</div>
-                <div class="n">Orçamentado (custo): <?= $fmt($custo_material_orc) ?> €<?php if ($custo_material_orc > 0): ?> · <span class="<?= $tot_comprado > $custo_material_orc ? 'neg' : 'pos' ?>"><?= $fmt($tot_comprado / $custo_material_orc * 100, 0) ?>%</span><?php endif; ?></div></div>
+                <div class="n">Sem consumíveis: <?= $fmt($tot_material_sem_cons) ?> € · orçamentado (custo): <?= $fmt($custo_material_orc) ?> €<?php if ($custo_material_orc > 0): ?> · <span class="<?= $tot_material_sem_cons > $custo_material_orc ? 'neg' : 'pos' ?>"><?= $fmt($tot_material_sem_cons / $custo_material_orc * 100, 0) ?>%</span><?php endif; ?></div></div>
+            <div class="kpi"><div class="t">Consumíveis (s/ IVA)</div><div class="v" style="color:#2980b9;"><?= $fmt($tot_consumiveis) ?> €</div>
+                <div class="n"><?= $n_consumiveis ?> linha(s)<?= $tot_comprado > 0 ? ' · ' . $fmt($tot_consumiveis / $tot_comprado * 100, 1) . '% das compras' : '' ?><?php if ($consumiveis_por_desc): ?> · <a href="#cardConsumiveis" style="color:#2980b9;">ver detalhe</a><?php endif; ?></div></div>
             <div class="kpi"><div class="t">Horas previstas do material comprado</div><div class="v"><?= fmtHoras($horas_material) ?></div>
-                <div class="n">Qtd comprada × tempo de M.O. do artigo<?= $n_linhas ? ' · ' . $n_assoc . '/' . $n_linhas . ' linhas associadas' : '' ?></div></div>
+                <div class="n">Qtd comprada × tempo de M.O. do artigo<?= ($n_linhas - $n_consumiveis) ? ' · ' . $n_assoc . '/' . ($n_linhas - $n_consumiveis) . ' linhas associadas' : '' ?></div></div>
             <div class="kpi"><div class="t">Horas normais registadas</div><div class="v"><?= fmtHoras($horas_normais) ?></div>
                 <div class="n">Orçamentadas na obra: <?= fmtHoras($horas_orc) ?></div></div>
             <div class="kpi"><div class="t">Registadas vs previstas (material)</div>
@@ -513,7 +545,7 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
                 <?php else: ?><div class="v <?= $dif_horas > 0 ? 'neg' : 'pos' ?>"><?= ($dif_horas > 0 ? '+' : '−') . fmtHoras(abs($dif_horas)) ?></div>
                     <div class="n"><?= $dif_horas > 0 ? 'Mais' : 'Menos' ?> <?= $fmt(abs($pct_horas), 0) ?>% de horas do que o previsto para o material comprado</div><?php endif; ?></div>
         </div>
-        <?php if ($n_linhas && $n_assoc < $n_linhas): ?><div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> <?= $n_linhas - $n_assoc ?> linha(s) ainda sem artigo associado não contam nas horas nem na comparação com o orçamento. Associe-as em baixo, na compra respetiva.</div><?php endif; ?>
+        <?php if ($n_sem_artigo > 0): ?><div class="alert alert-info"><i class="fa-solid fa-circle-info"></i> <?= $n_sem_artigo ?> linha(s) sem artigo associado e não marcadas como consumível não contam nas horas nem na comparação com o orçamento. Associe-as ou marque-as como consumível em baixo, na compra respetiva.</div><?php endif; ?>
 
         <!-- IMPORTAR -->
         <div class="card" id="cardImportar">
@@ -540,11 +572,11 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
                 <div class="resumo-imp" id="resumoImp"></div>
                 <div class="table-responsive">
                     <table class="cartoes" id="tabImportar">
-                        <thead><tr><th>Descrição na fatura</th><th class="r">Qtd</th><th>Un</th><th class="r">Preço un.</th><th class="r">Valor</th><th>Artigo associado (orçamento / tabela de preços)</th><th class="c">Conversão</th></tr></thead>
+                        <thead><tr><th>Descrição na fatura</th><th class="r">Qtd</th><th>Un</th><th class="r">Preço un.</th><th class="r">Valor</th><th class="c">Consumível</th><th>Artigo associado (orçamento / tabela de preços)</th><th class="c">Conversão</th></tr></thead>
                         <tbody></tbody>
                     </table>
                 </div>
-                <p style="font-size:12px; color:#7f8c8d;"><i class="fa-solid fa-circle-info"></i> Verde: associação certa (memória ou referência). Laranja: sugestão por descrição parecida (confirme). Vermelho: sem sugestão, escreva parte do nome ou da referência para procurar. "Conversão": quantas unidades do artigo associado há em cada unidade da fatura (ex.: 1 km = 1000 m).</p>
+                <p style="font-size:12px; color:#7f8c8d;"><i class="fa-solid fa-circle-info"></i> Verde: associação certa (memória ou referência). Laranja: sugestão por descrição parecida (confirme). Vermelho: sem sugestão, escreva parte do nome ou da referência para procurar. Azul: consumível (parafusos, fita, buchas...), sem artigo nem horas. "Conversão": quantas unidades do artigo associado há em cada unidade da fatura (ex.: 1 km = 1000 m).</p>
                 <label style="display:none; margin:10px 0; font-weight:600; color:#c0392b;" id="lblDuplicado"><input type="checkbox" name="confirmar_duplicado" value="1"> Importar mesmo assim (o documento já existe)</label>
                 <div style="display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;">
                     <button type="button" class="btn btn-out" onclick="cancelarImportacao()"><i class="fa-solid fa-xmark"></i> Cancelar</button>
@@ -583,28 +615,52 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
         </div>
         <?php endif; ?>
 
+        <!-- CONSUMÍVEIS -->
+        <?php if ($consumiveis_por_desc): ?>
+        <div class="card" id="cardConsumiveis">
+            <h2><i class="fa-solid fa-screwdriver" style="color:#2980b9;"></i> Consumíveis <span style="margin-left:auto; font-size:15px; color:#2980b9;"><?= $fmt($tot_consumiveis) ?> € <span style="font-weight:400; color:#95a5a6; font-size:12px;">s/ IVA</span></span></h2>
+            <div class="table-responsive">
+                <table class="cartoes">
+                    <thead><tr><th>Consumível</th><th>Un</th><th class="r">Qtd comprada</th><th class="r">Valor</th><th class="r">% dos consumíveis</th></tr></thead>
+                    <tbody>
+                    <?php foreach ($consumiveis_por_desc as $cd): ?>
+                        <tr>
+                            <td class="t-desc"><?= $e($cd['desc']) ?></td>
+                            <td data-label="Un"><?= $e($cd['un']) ?></td>
+                            <td class="r" data-label="Qtd comprada"><?= fameQtd($cd['qtd']) ?></td>
+                            <td class="r" data-label="Valor"><?= $fmt($cd['valor']) ?> €</td>
+                            <td class="r" data-label="% dos consumíveis"><?= $tot_consumiveis > 0 ? $fmt($cd['valor'] / $tot_consumiveis * 100, 1) . '%' : '-' ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                    <tfoot><tr><td style="font-weight:800;">Total</td><td></td><td></td><td class="r" style="font-weight:800;"><?= $fmt($tot_consumiveis) ?> €</td><td></td></tr></tfoot>
+                </table>
+            </div>
+        </div>
+        <?php endif; ?>
+
         <!-- COMPRAS GRAVADAS -->
         <div class="card">
             <h2><i class="fa-solid fa-receipt" style="color:#576574;"></i> Compras importadas
                 <a href="?id_obra=<?= (int)$id_obra ?><?= $ver_anuladas ? '' : '&amp;anuladas=1' ?>" style="margin-left:auto; font-size:12px; color:#2980b9; text-decoration:none;"><?= $ver_anuladas ? 'Esconder anuladas' : 'Mostrar também as anuladas' ?></a></h2>
             <?php if (!$compras): ?><p style="color:#95a5a6; margin:0;">Ainda não há compras importadas nesta obra.</p><?php endif; ?>
-            <?php foreach ($compras as $c): $ls = $linhas_por_compra[$c['id']] ?? []; $na = count(array_filter($ls, fn($l) => $l['assoc_tipo'])); $ativa = $c['estado'] === 'Ativa'; ?>
+            <?php foreach ($compras as $c): $ls = $linhas_por_compra[$c['id']] ?? []; $na = count(array_filter($ls, fn($l) => $l['assoc_tipo'] || !empty($l['consumivel']))); $cons_c = array_sum(array_map(fn($l) => !empty($l['consumivel']) ? (float)$l['valor_liquido'] : 0, $ls)); $ativa = $c['estado'] === 'Ativa'; ?>
                 <details class="compra<?= $ativa ? '' : ' anulada' ?>" id="compra-<?= (int)$c['id'] ?>" <?= (isset($_GET['gravado']) && (int)$_GET['gravado'] === (int)$c['id']) ? 'open' : '' ?>>
                     <summary>
                         <i class="fa-solid fa-chevron-right" style="color:#95a5a6; font-size:11px;"></i>
                         <span class="s-doc"><?= $e(trim($c['tipo_doc'] . ' ' . $c['numero_doc']) ?: 'Compra #' . $c['id']) ?></span>
                         <span class="s-forn"><?= $e($c['fornecedor'] ?: '-') ?></span>
                         <span class="s-data"><?= $c['data_doc'] ? date('d/m/Y', strtotime($c['data_doc'])) : '' ?></span>
-                        <span class="tag <?= $na === count($ls) ? 'tag-memoria' : 'tag-semelhante' ?>"><?= $na ?>/<?= count($ls) ?> associadas</span>
+                        <span class="tag <?= $na === count($ls) ? 'tag-memoria' : 'tag-semelhante' ?>"><?= $na ?>/<?= count($ls) ?> tratadas</span>
                         <?php if (!$ativa): ?><span class="tag tag-nenhuma">Anulada</span><?php endif; ?>
                         <span class="s-tot"><?= $fmt($c['total_mercadoria']) ?> € <span style="font-weight:400; color:#95a5a6; font-size:12px;">s/ IVA</span></span>
                     </summary>
                     <div style="padding:12px 14px;">
                         <div class="table-responsive">
                             <table class="cartoes">
-                                <thead><tr><th>Descrição na fatura</th><th class="r">Qtd</th><th>Un</th><th class="r">Preço un.</th><th class="r">Valor</th><th>Artigo associado</th><th class="c">Conversão</th><th class="r">Horas prev.</th></tr></thead>
+                                <thead><tr><th>Descrição na fatura</th><th class="r">Qtd</th><th>Un</th><th class="r">Preço un.</th><th class="r">Valor</th><th class="c">Consumível</th><th>Artigo associado</th><th class="c">Conversão</th><th class="r">Horas prev.</th></tr></thead>
                                 <tbody>
-                                <?php foreach ($ls as $l): $tp = $l['assoc_tipo'] ?: 'nenhuma';
+                                <?php foreach ($ls as $l): $tp = !empty($l['consumivel']) ? 'consumivel' : ($l['assoc_tipo'] ?: 'nenhuma');
                                     $h = $l['tempo_un'] !== null ? (float)$l['quantidade'] * (float)$l['fator'] * (float)$l['tempo_un'] / 60 : null; ?>
                                     <tr class="a-<?= $e($tp) ?>" data-id="<?= (int)$l['id'] ?>">
                                         <td class="t-desc"><?= $e($l['designacao']) ?></td>
@@ -612,9 +668,10 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
                                         <td data-label="Un"><?= $e($l['unidade']) ?></td>
                                         <td class="r" data-label="Preço un."><?= $fmt($l['preco_unit'], 3) ?> €</td>
                                         <td class="r" data-label="Valor"><?= $fmt($l['valor_liquido']) ?> €</td>
+                                        <td class="c" data-label="Consumível"><input type="checkbox" class="cons-chk" <?= !empty($l['consumivel']) ? 'checked' : '' ?> <?= $ativa ? '' : 'disabled' ?> title="Consumível (parafusos, fita, buchas...): sem artigo nem horas de montagem" onchange="consumivelGravada(this)"></td>
                                         <td data-label="Artigo">
                                             <?php if ($ativa): ?>
-                                                <input type="text" class="assoc-input" list="listaArtigos" value="<?= $e($rotulo_alvo($l)) ?>" data-alvo="<?= $e($valor_alvo($l)) ?>" placeholder="Procurar no orçamento / tabela de preços..." onchange="associarGravada(this)">
+                                                <input type="text" class="assoc-input" list="listaArtigos" value="<?= $e($rotulo_alvo($l)) ?>" data-alvo="<?= $e($valor_alvo($l)) ?>" placeholder="<?= !empty($l['consumivel']) ? 'Consumível' : 'Procurar no orçamento / tabela de preços...' ?>" <?= !empty($l['consumivel']) ? 'disabled' : '' ?> onchange="associarGravada(this)">
                                             <?php else: ?><?= $e($rotulo_alvo($l) ?: '-') ?><?php endif; ?>
                                         </td>
                                         <td class="c" data-label="Conversão"><?php if ($ativa): ?><input type="text" class="fator-input" inputmode="decimal" value="<?= $e(rtrim(rtrim(number_format((float)$l['fator'], 6, ',', ''), '0'), ',')) ?>" onchange="associarGravada(this.closest('tr').querySelector('.assoc-input'))" title="Unidades do artigo por cada unidade da fatura"><?php else: ?><?= fameQtd($l['fator']) ?><?php endif; ?></td>
@@ -625,7 +682,7 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
                             </table>
                         </div>
                         <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-top:10px; font-size:12px; color:#7f8c8d;">
-                            <span>IVA: <?= $fmt($c['total_iva']) ?> € · Total do documento: <?= $fmt($c['total_documento']) ?> €<?= $c['ficheiro_nome'] ? ' · Ficheiro: ' . $e($c['ficheiro_nome']) : '' ?></span>
+                            <span><?= $cons_c > 0 ? 'Consumíveis: <b style="color:#2980b9;">' . $fmt($cons_c) . ' €</b> · Material: ' . $fmt((float)$c['total_mercadoria'] - $cons_c) . ' € · ' : '' ?>IVA: <?= $fmt($c['total_iva']) ?> € · Total do documento: <?= $fmt($c['total_documento']) ?> €<?= $c['ficheiro_nome'] ? ' · Ficheiro: ' . $e($c['ficheiro_nome']) : '' ?></span>
                             <?php if ($ativa): ?><button type="button" class="btn btn-red" onclick="abrirAnular(<?= (int)$c['id'] ?>, '<?= $e(addslashes(trim($c['tipo_doc'] . ' ' . $c['numero_doc']))) ?>')"><i class="fa-solid fa-ban"></i> Anular compra</button>
                             <?php else: ?><span>Anulada em <?= $c['anulado_em'] ? date('d/m/Y H:i', strtotime($c['anulado_em'])) : '' ?></span><?php endif; ?>
                         </div>
@@ -704,9 +761,13 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
     }
 
     // ---------- SUGESTÃO DE ASSOCIAÇÃO: memória → referência → descrição parecida ----------
+    // Palavras que costumam indicar um consumível (só sugestão, a confirmar)
+    const PALAVRAS_CONSUMIVEL = /\b(parafus|bucha|fita isol|fita adesiv|silicone|cola |spray|broca|disco de corte|anilha|porca|rebite|lixa|espuma|abracadeira|bracadeira|cinta|massa |vedante|desengordurante|luva)/;
     function sugerir(desc) {
         const m = MEMORIA[normTxt(desc).slice(0, 191)];
+        if (m && m.consumivel) return { alvo: '', origem: 'memoria', consumivel: true };
         if (m && PELO_VALOR.has(m.alvo)) return { alvo: m.alvo, origem: 'memoria', fator: m.fator };
+        if (PALAVRAS_CONSUMIVEL.test(normTxt(desc) + ' ')) return { alvo: '', origem: 'semelhante', consumivel: true };
         // Referência: códigos da descrição (ex.: "21131", "D9000-SR-V2") iguais à referência de um artigo da tabela
         const codigos = (String(desc).match(/[A-Za-z0-9][A-Za-z0-9\-\/.]*\d[A-Za-z0-9\-\/.]*/g) || []).map(soAlnum).filter(c => c.length >= 4);
         if (codigos.length) {
@@ -845,12 +906,20 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
                 + '<td data-label="Un">' + esc(l.un) + '</td>'
                 + '<td class="r" data-label="Preço un.">' + fmt(l.preco, 3) + ' €</td>'
                 + '<td class="r" data-label="Valor">' + fmt(l.valor) + ' €</td>'
+                + '<td class="c" data-label="Consumível"><input type="checkbox" class="cons-chk" title="Consumível (parafusos, fita, buchas...): sem artigo nem horas de montagem"></td>'
                 + '<td data-label="Artigo"><input type="text" class="assoc-input" list="listaArtigos" placeholder="Procurar no orçamento / tabela de preços..."> <span class="tag"></span><span class="un-dif"></span></td>'
                 + '<td class="c" data-label="Conversão"><input type="text" class="fator-input" inputmode="decimal" title="Unidades do artigo por cada unidade da fatura"></td>';
             const inp = tr.querySelector('.assoc-input'), fat = tr.querySelector('.fator-input');
             inp.dataset.alvo = o ? o.v : ''; inp.value = o ? o.l : '';
             tr.dataset.origem = s ? s.origem : 'nenhuma';
             fat.value = String(s && s.fator ? s.fator : (o ? fatorPadrao(l.un, o.un) : 1)).replace('.', ',');
+            const chk = tr.querySelector('.cons-chk');
+            chk.checked = !!(s && s.consumivel);
+            chk.addEventListener('change', () => {
+                if (chk.checked) { inp.dataset.alvo = ''; inp.value = ''; fat.value = '1'; tr.dataset.origem = 'manual'; }
+                else tr.dataset.origem = 'nenhuma';
+                pintarLinha(tr, l);
+            });
             inp.addEventListener('change', () => {
                 const ob = PELO_ROTULO.get(inp.value);
                 if (ob) { inp.dataset.alvo = ob.v; tr.dataset.origem = 'manual'; fat.value = String(fatorPadrao(l.un, ob.un)).replace('.', ','); }
@@ -875,18 +944,33 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
     const NOMES_ORIGEM = { memoria: 'memória', referencia: 'referência', semelhante: 'confirmar', manual: 'escolhido', nenhuma: 'sem artigo' };
     function pintarLinha(tr, l) {
         const o = tr.dataset.origem, tag = tr.querySelector('.tag');
+        const cons = tr.querySelector('.cons-chk').checked, inp = tr.querySelector('.assoc-input');
+        inp.disabled = cons;
+        inp.placeholder = cons ? 'Consumível (sem artigo)' : 'Procurar no orçamento / tabela de preços...';
+        tr.querySelector('.fator-input').disabled = cons;
+        if (cons) {
+            tr.className = o === 'semelhante' ? 'a-consumivel a-semelhante' : 'a-consumivel';
+            tag.className = 'tag ' + (o === 'semelhante' ? 'tag-semelhante' : 'tag-consumivel');
+            tag.textContent = o === 'semelhante' ? 'consumível? confirme' : (o === 'memoria' ? 'consumível (memória)' : 'consumível');
+            tr.querySelector('.un-dif').textContent = '';
+            contarAssoc(); return;
+        }
         tr.className = 'a-' + o;
         tag.className = 'tag tag-' + o; tag.textContent = NOMES_ORIGEM[o] || o;
-        const ob = PELO_VALOR.get(tr.querySelector('.assoc-input').dataset.alvo);
+        const ob = PELO_VALOR.get(inp.dataset.alvo);
         tr.querySelector('.un-dif').textContent = (ob && unNorm(ob.un) !== unNorm(l.un)) ? 'Fatura em "' + l.un + '", artigo em "' + ob.un + '": confirme a conversão' : '';
         contarAssoc();
     }
     function contarAssoc() {
         const rows = document.querySelectorAll('#tabImportar tbody tr');
-        const ok = Array.from(rows).filter(r => r.querySelector('.assoc-input').dataset.alvo).length;
-        const conf = Array.from(rows).filter(r => r.dataset.origem === 'semelhante').length;
+        const arr = Array.from(rows);
+        const cons = arr.filter(r => r.querySelector('.cons-chk').checked);
+        const ok = arr.filter(r => !r.querySelector('.cons-chk').checked && r.querySelector('.assoc-input').dataset.alvo).length;
+        const conf = arr.filter(r => r.dataset.origem === 'semelhante').length;
+        const valCons = docAtual ? cons.reduce((a, r) => a + (docAtual.linhas[+r.dataset.i].valor || 0), 0) : 0;
         const el = document.getElementById('nAssoc');
-        if (el) el.innerHTML = 'Associadas: <b>' + ok + '/' + rows.length + '</b>' + (conf ? ' · <span class="avi">' + conf + ' para confirmar</span>' : '');
+        if (el) el.innerHTML = 'Associadas: <b>' + ok + '</b> · Consumíveis: <b style="color:#2980b9;">' + cons.length + ' (' + fmt(valCons) + ' €)</b> · Sem artigo: <b>' + (arr.length - ok - cons.length) + '</b>'
+            + (conf ? ' · <span class="avi">' + conf + ' para confirmar</span>' : '');
     }
     function cancelarImportacao() {
         document.getElementById('formImportar').style.display = 'none';
@@ -898,8 +982,9 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
         const linhas = Array.from(document.querySelectorAll('#tabImportar tbody tr')).map(tr => {
             const l = docAtual.linhas[+tr.dataset.i];
             const f = num(tr.querySelector('.fator-input').value);
+            const cons = tr.querySelector('.cons-chk').checked;
             return { desc: l.desc, qtd: l.qtd, un: l.un, preco: l.preco, desconto: l.desconto, valor: l.valor, taxa: l.taxa,
-                     alvo: tr.querySelector('.assoc-input').dataset.alvo, origem: tr.dataset.origem, fator: isNaN(f) || f <= 0 ? 1 : f };
+                     alvo: cons ? '' : tr.querySelector('.assoc-input').dataset.alvo, origem: tr.dataset.origem, fator: isNaN(f) || f <= 0 ? 1 : f, consumivel: cons ? 1 : 0 };
         });
         document.getElementById('dadosImportar').value = JSON.stringify({
             cabecalho: { tipo: document.getElementById('cabTipo').value, numero: document.getElementById('cabNumero').value, data: document.getElementById('cabData').value,
@@ -917,17 +1002,24 @@ $JSON = JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP | JSON_UNESC
         const f = num(tr.querySelector('.fator-input').value);
         const fd = new FormData();
         fd.append('acao', 'associar_linha'); fd.append('csrf_token', CSRF); fd.append('id_linha', tr.dataset.id);
-        fd.append('alvo', alvo); fd.append('fator', isNaN(f) || f <= 0 ? 1 : f);
+        const cons = tr.querySelector('.cons-chk').checked;
+        fd.append('alvo', cons ? '' : alvo); fd.append('fator', isNaN(f) || f <= 0 ? 1 : f); fd.append('consumivel', cons ? 1 : 0);
         inp.disabled = true;
         try {
             const r = await fetch('obra_compras.php?id_obra=' + ID_OBRA, { method: 'POST', body: fd });
             const j = await r.json();
             if (!j.ok) throw new Error(j.erro || 'erro');
-            tr.className = alvo ? 'a-manual' : 'a-nenhuma';
-            inp.dataset.alvo = alvo;
-            inp.title = 'Gravado — atualize a página para ver as horas e a comparação recalculadas';
+            tr.className = cons ? 'a-consumivel' : (alvo ? 'a-manual' : 'a-nenhuma');
+            inp.dataset.alvo = cons ? '' : alvo;
+            inp.title = 'Gravado — atualize a página para ver as horas e os totais recalculados';
         } catch (err) { alert('Não foi possível gravar: ' + err.message); }
-        inp.disabled = false;
+        inp.disabled = cons;
+    }
+    function consumivelGravada(chk) {
+        const inp = chk.closest('tr').querySelector('.assoc-input');
+        if (chk.checked) { inp.value = ''; inp.dataset.alvo = ''; inp.placeholder = 'Consumível'; }
+        else inp.placeholder = 'Procurar no orçamento / tabela de preços...';
+        associarGravada(inp);
     }
 
     function abrirAnular(id, doc) {
