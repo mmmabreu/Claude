@@ -814,7 +814,7 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
                     <h2 id="form_despesa_title" style="margin:0;"><i class="fa-solid fa-plus-circle"></i> Registar Nova Despesa Manual</h2>
                     <a href="obra_compras.php?id_obra=<?= (int)$obra_selecionada ?>" class="btn-importar-compra" title="Importar a fatura / encomenda linha a linha, associar aos artigos do orçamento e comparar horas"><i class="fa-solid fa-file-import"></i> Importar fatura / encomenda</a>
                 </div>
-                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?><?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">" class="form-row" id="formDespesaGestao">
+                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?>" class="form-row" id="formDespesaGestao"><?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
                     <input type="hidden" name="add_despesa" id="add_despesa_flag_gestao" value="1">
                     <input type="hidden" name="id_despesa_edit" id="id_despesa_edit_gestao" value="">
 
@@ -892,7 +892,7 @@ $mes_mapa_seguinte = date('Y-m', strtotime('+1 month', $timestamp_mes_mapa));
                                             <?php else: ?>
                                             <div style="display:flex; gap:8px; justify-content:center; align-items:center;">
                                                 <button type="button" class="btn-icon" onclick='editarDespesaGestao(<?= json_encode($dm, JSON_HEX_APOS | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_QUOT) ?>)' title="Editar"><i class="fa-solid fa-pen-to-square"></i></button>
-                                                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?><?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">" style="margin:0;" onsubmit="return confirm('Duplicar esta despesa com a data de hoje?');">
+                                                <form method="POST" action="gestao.php?id_obra=<?= $obra_selecionada ?>" style="margin:0;" onsubmit="return confirm('Duplicar esta despesa com a data de hoje?');"><?php /* REGRA DE OURO 7 */ ?><input type="hidden" name="csrf_token" value="<?= htmlspecialchars(gerar_csrf_token()) ?>">
                                                     <input type="hidden" name="duplicar_despesa_id" value="<?= $dm['id'] ?>">
                                                     <button type="submit" class="btn-icon" title="Duplicar"><i class="fa-solid fa-copy"></i></button>
                                                 </form>
