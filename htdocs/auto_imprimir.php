@@ -184,7 +184,13 @@ function linhasAuto($lista, $suplementar, $fmt) {
     <link rel="apple-touch-icon" href="/mab.png">
     <!-- Folha A4 horizontal, definida antes de tudo (não depende de nenhum ficheiro externo) -->
     <style>
-        @page { size: 297mm 210mm; margin: 0; }
+        @page {
+            size: A4 landscape;
+            margin: 10mm 10mm 16mm 10mm;  /* margens reais: valem em TODAS as folhas */
+            /* Caixas de margem vazias: o browser não imprime data / endereço da página por cima do auto */
+            @top-left { content: ""; } @top-center { content: ""; } @top-right { content: ""; }
+            @bottom-left { content: ""; } @bottom-right { content: ""; }
+        }
     </style>
     <!-- Ícones só para os botões do ecrã: media="screen" para não interferirem com a impressão -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" media="screen">
@@ -305,10 +311,9 @@ function linhasAuto($lista, $suplementar, $fmt) {
 
         /* OTIMIZAÇÕES DE IMPRESSÃO (A4 Horizontal) */
         @media print {
-            @page { size: 297mm 210mm; margin: 0; }
             body { 
                 background: #fff !important; 
-                padding: 0 10mm; 
+                padding: 0; 
             }
             * {
                 -webkit-print-color-adjust: exact !important; 
@@ -319,8 +324,8 @@ function linhasAuto($lista, $suplementar, $fmt) {
             .no-print { display: none !important; }
             .info-grid { border: none; padding: 0; background: none !important; }
             
-            table.wrapper-table > thead > tr > td { padding-top: 10mm !important; }
-            table.wrapper-table > tfoot > tr > td { padding-bottom: 5mm !important; }
+            table.wrapper-table > thead > tr > td { padding-top: 0 !important; }
+            table.wrapper-table > tfoot > tr > td { padding-bottom: 0 !important; }
             
             thead { display: table-header-group; }
             .data-table tfoot { display: table-row-group; } 
@@ -335,9 +340,9 @@ function linhasAuto($lista, $suplementar, $fmt) {
             /* Fixa o rodapé mais abaixo no A4 na impressão */
             .page-footer-content {
                 position: fixed;
-                bottom: 5mm; 
-                left: 10mm;
-                right: 10mm;
+                bottom: 0;
+                left: 0;
+                right: 0;
                 margin-top: 0;
                 background: #fff !important;
             }
