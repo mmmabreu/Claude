@@ -105,7 +105,10 @@ if ($doc === 'termo') {
     $pdf->Pares([['Dono de obra:', (string)$t['cliente_nome']], ['NIF:', (string)$t['cliente_nif']]]);
     $pdf->Pares([['Edifício:', $edificio], ['Tipo:', $t['tipo_edificio'] . ($t['n_fogos'] !== null && $t['n_fogos'] !== '' ? ' · ' . $t['n_fogos'] . ' fogo(s)/fração(ões)' : '')]]);
     $pdf->Pares([['Morada:', $morada]]);
-    $pdf->Pares([['Projetista ITED:', $t['projetista_nome']], ['Inscrição / data:', trim($t['projetista_inscricao'] . ($t['projeto_data'] ? ' · ' . dataPT($t['projeto_data']) : ''))]]);
+    if (!isset($t['tem_projeto']) || (int)$t['tem_projeto'] === 1)
+        $pdf->Pares([['Projetista ITED:', $t['projetista_nome']], ['Inscrição / data:', trim($t['projetista_inscricao'] . ($t['projeto_data'] ? ' · ' . dataPT($t['projeto_data']) : ''))]]);
+    else
+        $pdf->Pares([['Projeto ITED:', 'Sem projeto ITED']]);
     $pdf->Pares([['Técnico ITED:', $t['tecnico_nome']], ['Inscrição ANACOM:', $t['tecnico_inscricao']]]);
     $pdf->Ln(8);
 

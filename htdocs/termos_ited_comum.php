@@ -12,20 +12,20 @@
 //   termos_ited          -> dados do termo (obra, edifício, projeto, técnico, equipamento de ensaio, texto do termo)
 //   termos_ited_pontos   -> pontos RJ45 ensaiados
 //   termos_ited_arquivo  -> NUNCA PERDER DADOS: cópia do termo e dos pontos antes de cada alteração ou eliminação
-// Os dados do técnico / equipamento de ensaio da última gravação ficam em configuracoes (chaves ited_*) e
-// preenchem os termos novos.
+// Os dados do técnico da última gravação ficam em configuracoes (chaves ited_*) e preenchem os termos novos.
+// O equipamento de ensaio vem SEMPRE pré-preenchido com o certificador da empresa ($ITED_EQUIPAMENTO).
+// O projeto ITED é opcional (tem_projeto = 0 → "Sem projeto ITED" e o texto do termo não fala no projeto).
 // =====================================================================
 
 $ITED_TIPOS_EDIFICIO = ['Residencial', 'Não residencial', 'Misto', 'Moradia unifamiliar', 'Loteamento / urbanização', 'Outro'];
 $ITED_CATEGORIAS = ['Cat. 6', 'Cat. 6A', 'Cat. 5e', 'Cat. 7', 'Cat. 7A', 'Cat. 8'];
 $ITED_CONFIGURACOES = ['Ligação permanente', 'Canal'];
+// Certificador da empresa: pré-preenchido em todos os termos (pode ser alterado em cada termo)
+$ITED_EQUIPAMENTO = ['equip_teste' => 'DSX-8000', 'equip_serie' => '1824065', 'equip_calibracao' => '2026-07-14'];
 $ITED_CONFIG_PADRAO = [
     'ited_tecnico_nome'      => 'Mário Manuel Martins Abreu',
     'ited_tecnico_inscricao' => '',
     'ited_entidade_registo'  => '',
-    'ited_equip_teste'       => '',
-    'ited_equip_serie'       => '',
-    'ited_equip_calibracao'  => '',
     'ited_norma_teste'       => 'ISO/IEC 11801 Classe E (Cat. 6) — Ligação permanente',
 ];
 
@@ -41,6 +41,7 @@ function itedCriarTabelas($pdo) {
         morada VARCHAR(255) NOT NULL DEFAULT '',
         localidade VARCHAR(150) NOT NULL DEFAULT '',
         n_fogos INT NULL,
+        tem_projeto TINYINT(1) NOT NULL DEFAULT 1,
         projetista_nome VARCHAR(150) NOT NULL DEFAULT '',
         projetista_inscricao VARCHAR(60) NOT NULL DEFAULT '',
         projeto_data DATE NULL,
@@ -58,6 +59,8 @@ function itedCriarTabelas($pdo) {
         criado_por INT NULL, criado_em DATETIME NULL, atualizado_em DATETIME NULL,
         KEY idx_obra (id_obra)
     ) DEFAULT CHARSET=utf8mb4");
+    if (!$pdo->query("SHOW COLUMNS FROM termos_ited LIKE 'tem_projeto'")->fetch())
+        $pdo->exec("ALTER TABLE termos_ited ADD COLUMN tem_projeto TINYINT(1) NOT NULL DEFAULT 1 AFTER n_fogos");
     $pdo->exec("CREATE TABLE IF NOT EXISTS termos_ited_pontos (
         id INT AUTO_INCREMENT PRIMARY KEY,
         id_termo INT NOT NULL,
@@ -157,14 +160,15 @@ function itedTextoPadrao($t) {
     $edif = trim((string)($t['edificio'] ?? '')) ?: trim((string)($t['obra_nome'] ?? ''));
     $morada = trim(trim((string)($t['morada'] ?? '')) . (trim((string)($t['localidade'] ?? '')) !== '' ? ', ' . trim($t['localidade']) : ''));
     $proj = '';
-    if (trim((string)($t['projetista_nome'] ?? '')) !== '') {
+    $tem_projeto = !isset($t['tem_projeto']) || (int)$t['tem_projeto'] === 1;
+    if ($tem_projeto && trim((string)($t['projetista_nome'] ?? '')) !== '') {
         $proj = ' da autoria de ' . trim($t['projetista_nome']) . (trim((string)($t['projetista_inscricao'] ?? '')) !== '' ? ' (inscrição n.º ' . trim($t['projetista_inscricao']) . ')' : '');
     }
     $p1 = "Eu, " . $tec . ", técnico ITED" . ($insc !== '' ? " inscrito na ANACOM com o n.º " . $insc : '')
         . ", ao serviço da entidade instaladora m. Abreu – Instalações Técnicas, Lda." . ($reg !== '' ? " (registo n.º " . $reg . ")" : '')
         . ", declaro, para os devidos efeitos, que a instalação de infraestruturas de telecomunicações em edifícios (ITED)"
         . ($edif !== '' ? " do edifício «" . $edif . "»" : '') . ($morada !== '' ? ", sito em " . $morada : '')
-        . ", foi executada de acordo com o projeto técnico" . $proj . " e com as regras técnicas do Manual ITED (4.ª edição),"
+        . ", foi executada de acordo com " . ($tem_projeto ? "o projeto técnico" . $proj . " e com " : "") . "as regras técnicas do Manual ITED (4.ª edição),"
         . " em cumprimento do Decreto-Lei n.º 123/2009, de 21 de maio, na sua redação atual.";
     $p2 = "Declaro ainda que foram realizados os ensaios de funcionalidade previstos no Manual ITED, cujos resultados constam do"
         . " relatório de ensaios que acompanha este termo, e que a instalação se encontra em condições de ser utilizada.";

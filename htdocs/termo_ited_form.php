@@ -45,7 +45,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             'id_obra' => $id_obra, 'id_cliente' => $id_cliente, 'data_emissao' => $d($_POST['data_emissao'] ?? '') ?: date('Y-m-d'), 'estado' => $estado,
             'tipo_edificio' => $txt('tipo_edificio', 40), 'edificio' => $edificio, 'morada' => $txt('morada', 255), 'localidade' => $txt('localidade', 150),
             'n_fogos' => $n_fogos === false ? null : $n_fogos,
-            'projetista_nome' => $txt('projetista_nome', 150), 'projetista_inscricao' => $txt('projetista_inscricao', 60), 'projeto_data' => $d($_POST['projeto_data'] ?? ''),
+            'tem_projeto' => !empty($_POST['tem_projeto']) ? 1 : 0,
+            'projetista_nome' => !empty($_POST['tem_projeto']) ? $txt('projetista_nome', 150) : '', 'projetista_inscricao' => !empty($_POST['tem_projeto']) ? $txt('projetista_inscricao', 60) : '',
+            'projeto_data' => !empty($_POST['tem_projeto']) ? $d($_POST['projeto_data'] ?? '') : null,
             'tecnico_nome' => $txt('tecnico_nome', 150), 'tecnico_inscricao' => $txt('tecnico_inscricao', 60), 'entidade_registo' => $txt('entidade_registo', 60),
             'assinatura' => !empty($_POST['assinatura']) ? 1 : 0, 'texto_termo' => trim((string)($_POST['texto_termo'] ?? '')) ?: null,
             'equip_teste' => $txt('equip_teste', 150), 'equip_serie' => $txt('equip_serie', 80), 'equip_calibracao' => $d($_POST['equip_calibracao'] ?? ''),
@@ -84,8 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $pdo->commit();
         // Técnico e equipamento de ensaio ficam para os termos seguintes
         itedGuardarConfig($pdo, ['ited_tecnico_nome' => $campos['tecnico_nome'], 'ited_tecnico_inscricao' => $campos['tecnico_inscricao'],
-                                 'ited_entidade_registo' => $campos['entidade_registo'], 'ited_equip_teste' => $campos['equip_teste'],
-                                 'ited_equip_serie' => $campos['equip_serie'], 'ited_equip_calibracao' => (string)$campos['equip_calibracao'], 'ited_norma_teste' => $campos['norma_teste']]);
+                                 'ited_entidade_registo' => $campos['entidade_registo'], 'ited_norma_teste' => $campos['norma_teste']]);
         registrarLog($pdo, "Gravou termo ITED #$id (" . count($limpos) . " pontos RJ45)", "Termos ITED");
         header("Location: termo_ited_form.php?id=$id&gravado=1"); exit;
     } catch (Exception $ex) {
@@ -107,11 +108,13 @@ try {
 $t = $termo ?: [
     'id_obra' => filter_input(INPUT_GET, 'id_obra', FILTER_VALIDATE_INT) ?: '', 'data_emissao' => date('Y-m-d'), 'estado' => 'Rascunho',
     'tipo_edificio' => 'Residencial', 'edificio' => '', 'morada' => '', 'localidade' => '', 'n_fogos' => '',
-    'projetista_nome' => '', 'projetista_inscricao' => '', 'projeto_data' => '',
+    'tem_projeto' => 1, 'projetista_nome' => '', 'projetista_inscricao' => '', 'projeto_data' => '',
     'tecnico_nome' => $cfg['ited_tecnico_nome'], 'tecnico_inscricao' => $cfg['ited_tecnico_inscricao'], 'entidade_registo' => $cfg['ited_entidade_registo'],
-    'assinatura' => 1, 'texto_termo' => '', 'equip_teste' => $cfg['ited_equip_teste'], 'equip_serie' => $cfg['ited_equip_serie'],
-    'equip_calibracao' => $cfg['ited_equip_calibracao'], 'norma_teste' => $cfg['ited_norma_teste'], 'data_ensaios' => date('Y-m-d'), 'observacoes' => '',
+    'assinatura' => 1, 'texto_termo' => '', 'equip_teste' => '', 'equip_serie' => '',
+    'equip_calibracao' => '', 'norma_teste' => $cfg['ited_norma_teste'], 'data_ensaios' => date('Y-m-d'), 'observacoes' => '',
 ];
+// Equipamento de ensaio: sempre pré-preenchido com o certificador da empresa (nos termos antigos, se estiver vazio)
+foreach ($ITED_EQUIPAMENTO as $k => $v) if (trim((string)($t[$k] ?? '')) === '') $t[$k] = $v;
 $pontos = ($id && empty($_POST)) ? itedPontos($pdo, $id) : (isset($limpos) ? array_map(fn($p) => array_combine(['identificacao', 'localizacao', 'painel_porta', 'categoria', 'configuracao', 'comprimento', 'mapa', 'margem_next', 'resultado', 'observacoes'], $p), $limpos) : []);
 $e = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
 $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP;
@@ -245,8 +248,10 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
             </div>
 
             <div class="card">
-                <h2><i class="fa-solid fa-compass-drafting"></i> 2. Projeto ITED</h2>
-                <div class="grid">
+                <h2><i class="fa-solid fa-compass-drafting"></i> 2. Projeto ITED
+                    <label class="chk barra-pontos" style="text-transform:none;"><input type="checkbox" name="tem_projeto" id="tem_projeto" value="1" <?= !isset($t['tem_projeto']) || (int)$t['tem_projeto'] === 1 ? 'checked' : '' ?> onchange="mostrarProjeto()"> Existe projeto ITED</label></h2>
+                <p class="ajuda" id="semProjeto" style="display:none; margin:0;">Sem projeto ITED: o termo não refere projeto e a identificação indica "Sem projeto ITED".</p>
+                <div class="grid" id="camposProjeto">
                     <div class="fg"><label>Projetista</label><input type="text" name="projetista_nome" maxlength="150" value="<?= $e($t['projetista_nome']) ?>"></div>
                     <div class="fg"><label>Nº de inscrição do projetista</label><input type="text" name="projetista_inscricao" maxlength="60" value="<?= $e($t['projetista_inscricao']) ?>"></div>
                     <div class="fg"><label>Data do projeto</label><input type="date" name="projeto_data" value="<?= $e($t['projeto_data']) ?>"></div>
@@ -356,6 +361,14 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
         if (!mo.value.trim()) mo.value = o.morada;
     }
 
+    // ---------- Projeto ITED (opcional) ----------
+    function mostrarProjeto() {
+        const tem = document.getElementById('tem_projeto').checked;
+        document.getElementById('camposProjeto').style.display = tem ? '' : 'none';
+        document.getElementById('semProjeto').style.display = tem ? 'none' : 'block';
+    }
+    mostrarProjeto();
+
     // ---------- Texto padrão (igual ao gerado no PDF) ----------
     function usarTextoPadrao() {
         const v = n => (document.querySelector('[name="' + n + '"]').value || '').trim();
@@ -364,12 +377,13 @@ $JSON = JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | 
         const obra = OBRAS.find(x => x.id === parseInt(document.getElementById('id_obra').value || 0, 10));
         const edif = v('edificio') || (obra ? obra.nome : '');
         const morada = v('morada') + (v('localidade') ? ', ' + v('localidade') : '');
-        const proj = v('projetista_nome') ? ' da autoria de ' + v('projetista_nome') + (v('projetista_inscricao') ? ' (inscrição n.º ' + v('projetista_inscricao') + ')' : '') : '';
+        const temProj = document.getElementById('tem_projeto').checked;
+        const proj = temProj && v('projetista_nome') ? ' da autoria de ' + v('projetista_nome') + (v('projetista_inscricao') ? ' (inscrição n.º ' + v('projetista_inscricao') + ')' : '') : '';
         ta.value = 'Eu, ' + (v('tecnico_nome') || '_______________') + ', técnico ITED' + (v('tecnico_inscricao') ? ' inscrito na ANACOM com o n.º ' + v('tecnico_inscricao') : '')
             + ', ao serviço da entidade instaladora m. Abreu – Instalações Técnicas, Lda.' + (v('entidade_registo') ? ' (registo n.º ' + v('entidade_registo') + ')' : '')
             + ', declaro, para os devidos efeitos, que a instalação de infraestruturas de telecomunicações em edifícios (ITED)'
             + (edif ? ' do edifício «' + edif + '»' : '') + (morada ? ', sito em ' + morada : '')
-            + ', foi executada de acordo com o projeto técnico' + proj + ' e com as regras técnicas do Manual ITED (4.ª edição),'
+            + ', foi executada de acordo com ' + (temProj ? 'o projeto técnico' + proj + ' e com ' : '') + 'as regras técnicas do Manual ITED (4.ª edição),'
             + ' em cumprimento do Decreto-Lei n.º 123/2009, de 21 de maio, na sua redação atual.'
             + '\n\nDeclaro ainda que foram realizados os ensaios de funcionalidade previstos no Manual ITED, cujos resultados constam do'
             + ' relatório de ensaios que acompanha este termo, e que a instalação se encontra em condições de ser utilizada.';
